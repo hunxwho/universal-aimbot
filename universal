@@ -19,6 +19,7 @@ local Stats = game:GetService("Stats")
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
+local VirtualUser = game:FindService("VirtualUser") or (pcall(function() return game:GetService("VirtualUser") end) and game:GetService("VirtualUser")) or nil
 local VirtualInputManager = game:FindService("VirtualInputManager") or (pcall(function() return game:GetService("VirtualInputManager") end) and game:GetService("VirtualInputManager")) or nil
 
 local LocalPlayer = Players.LocalPlayer
@@ -47,10 +48,12 @@ local OriginalLighting = {
 -- 1. CONFIGURATION & STATE
 -----------------------------------
 local QuantumConfig = {
-    -- Global & Universal AI/Bot Support
+    -- Global & Universal AI/Bot + Custom Rig Support
     TeamCheck = false,
     IncludeBots = true,
+    CustomRigSupport = true,
     IgnoreForceField = false,
+    AntiAFK = true,
     
     -- Combat
     Aimbot = false,
@@ -72,6 +75,7 @@ local QuantumConfig = {
     AimbotKeyName = "MouseButton2",
     TargetPart = "Head",
     ShowTargetLine = true,
+    ShowTargetHUD = true,
     HitboxExpander = false,
     HitboxPart = "HumanoidRootPart",
     HitboxSize = 8,
@@ -80,14 +84,22 @@ local QuantumConfig = {
     -- Visuals
     NameESP = false,
     BoxESP = false,
+    CornerBoxESP = false,
+    FilledBoxESP = false,
     HealthESP = false,
     HeadDotESP = false,
     Tracers = false,
     TracerOrigin = "Bottom",
     SkeletonESP = false,
     ChamsESP = false,
+    OffScreenArrows = false,
+    ArrowRadius = 220,
+    CustomCrosshair = false,
+    CrosshairSpin = true,
+    CrosshairSize = 12,
+    CrosshairGap = 6,
     RainbowESP = false,
-    MaxDistance = 2000,
+    MaxDistance = 2500,
     ESP_Color = Color3.fromRGB(255, 45, 85),
 
     -- Movement & LocalPlayer
@@ -101,8 +113,14 @@ local QuantumConfig = {
     Noclip = false,
     SpinBot = false,
     SpinSpeed = 25,
+    ClickTP = false,
     CustomCameraFOV = false,
     CameraFOV = 90,
+
+    -- Teleports & Spectate
+    SelectedTargetName = "None",
+    SpectateTarget = false,
+    TeleportOffsetZ = 4,
     
     -- World Engine
     WorldTheme = "Default",
@@ -166,9 +184,13 @@ local ThemeColors = {
     DangerRed = Color3.fromRGB(255, 55, 65)
 }
 
+local MAX_SKELETON_LINES = 28
 local ESP_Objects = {}
 local ActiveEntities = {}       -- [Model] = {Model = model, Player = playerOrNil, IsBot = boolean, Name = string}
-local DiscoveredBotModels = {}  -- [Model] = true (Populated by deep workspace scanner + DescendantAdded)
+local DiscoveredBotModels = {}  -- [Model] = true
+local RigCache = setmetatable({}, {__mode = "k"}) -- Caches resolved custom rig parts & joints per model
+local ThumbnailCache = {}
+local SavedWaypoints = {}
 local OriginalPartProperties = {}
 local LocalPlayerNoclipCache = {}
 local ThemeElements = {}
@@ -319,38 +341,8 @@ local function UpdateWorld()
     end
 end
 
--- Persistent Quantum Aura Handler
-task.spawn(function()
-    while not IsUnloaded do
-        pcall(function()
-            local char = LocalPlayer.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local emitter = hrp:FindFirstChild("QuantumAuraEmitter")
-                if QuantumConfig.QuantumAura then
-                    if not emitter then
-                        emitter = Instance.new("ParticleEmitter")
-                        emitter.Name = "QuantumAuraEmitter"
-                        emitter.Size = NumberSequence.new(0.5, 0)
-                        emitter.Texture = "rbxassetid://243098098"
-                        emitter.Lifetime = NumberRange.new(0.8)
-                        emitter.Rate = 28
-                        emitter.Speed = NumberRange.new(2.5)
-                        emitter.Parent = hrp
-                    end
-                    emitter.Color = ColorSequence.new(Themes[QuantumConfig.Theme])
-                    emitter.Enabled = true
-                elseif emitter then
-                    emitter.Enabled = false
-                end
-            end
-        end)
-        task.wait(0.25)
-    end
-end)
-
 -----------------------------------
--- 3. UI HELPER & THEME ENGINE
+-- 3. UI HELPER & DRAWING OBJECTS
 -----------------------------------
 local function AddCorner(obj, radius)
     local corner = Instance.new("UICorner")
@@ -401,11 +393,25 @@ TargetLockRing.Filled = false
 TargetLockRing.NumSides = 24
 TargetLockRing.Transparency = 1
 
+local CrosshairLines = {}
+for i = 1, 4 do
+    local line = Drawing.new("Line")
+    line.Visible = false
+    line.Thickness = 1.8
+    line.Transparency = 1
+    table.insert(CrosshairLines, line)
+end
+local CrosshairCenterDot = Drawing.new("Circle")
+CrosshairCenterDot.Visible = false
+CrosshairCenterDot.Radius = 2
+CrosshairCenterDot.Filled = true
+CrosshairCenterDot.Transparency = 1
+
 -----------------------------------
--- 4. MODERN NOVA GUI ARCHITECTURE
+-- 4. MODERN NOVA GUI & TARGET HUD
 -----------------------------------
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "QuantumScriptsPremium"
+ScreenGui.Name = "QuantumScriptsPremium_v4"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.IgnoreGuiInset = true
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
@@ -417,7 +423,7 @@ if not guiSuccess then
     ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 end
 
--- Toast Notification System (Supports Standard & High-Risk Anti-Cheat Alerts)
+-- Toast Notification System
 local NotifContainer = Instance.new("Frame")
 NotifContainer.Size = UDim2.new(0, 280, 0, 240)
 NotifContainer.Position = UDim2.new(1, -296, 1, -256)
@@ -485,6 +491,65 @@ local function Notify(titleText, bodyText, duration, isWarning)
     end)
 end
 
+-- Floating On-Screen Target HUD Card
+local TargetHUDFrame = Instance.new("Frame")
+TargetHUDFrame.Size = UDim2.new(0, 250, 0, 72)
+TargetHUDFrame.Position = UDim2.new(0.5, -125, 0.78, 0)
+TargetHUDFrame.BackgroundColor3 = ThemeColors.CardBG
+TargetHUDFrame.BackgroundTransparency = 0.08
+TargetHUDFrame.Visible = false
+TargetHUDFrame.Active = true
+AddCorner(TargetHUDFrame, 12)
+local TargetHUDStroke = AddStroke(TargetHUDFrame, Themes[QuantumConfig.Theme], 1.5)
+TargetHUDFrame.Parent = ScreenGui
+table.insert(ThemeElements, {inst = TargetHUDStroke, prop = "Color"})
+
+local TargetAvatar = Instance.new("ImageLabel")
+TargetAvatar.Size = UDim2.new(0, 48, 0, 48)
+TargetAvatar.Position = UDim2.new(0, 12, 0.5, -24)
+TargetAvatar.BackgroundColor3 = ThemeColors.ControlBG
+TargetAvatar.Image = "rbxassetid://0"
+AddCorner(TargetAvatar, 24)
+local AvatarStroke = AddStroke(TargetAvatar, Themes[QuantumConfig.Theme], 1.2)
+TargetAvatar.Parent = TargetHUDFrame
+table.insert(ThemeElements, {inst = AvatarStroke, prop = "Color"})
+
+local TargetHUDName = Instance.new("TextLabel")
+TargetHUDName.Size = UDim2.new(1, -76, 0, 18)
+TargetHUDName.Position = UDim2.new(0, 68, 0, 10)
+TargetHUDName.BackgroundTransparency = 1
+TargetHUDName.Text = "Target"
+TargetHUDName.TextColor3 = ThemeColors.TextWhite
+TargetHUDName.Font = Enum.Font.GothamBold
+TargetHUDName.TextSize = 13
+TargetHUDName.TextTruncate = Enum.TextTruncate.AtEnd
+TargetHUDName.TextXAlignment = Enum.TextXAlignment.Left
+TargetHUDName.Parent = TargetHUDFrame
+
+local TargetHUDInfo = Instance.new("TextLabel")
+TargetHUDInfo.Size = UDim2.new(1, -76, 0, 14)
+TargetHUDInfo.Position = UDim2.new(0, 68, 0, 28)
+TargetHUDInfo.BackgroundTransparency = 1
+TargetHUDInfo.Text = "HP: 100/100 | 0m"
+TargetHUDInfo.TextColor3 = ThemeColors.TextGray
+TargetHUDInfo.Font = Enum.Font.GothamMedium
+TargetHUDInfo.TextSize = 11
+TargetHUDInfo.TextXAlignment = Enum.TextXAlignment.Left
+TargetHUDInfo.Parent = TargetHUDFrame
+
+local TargetHUDHPBG = Instance.new("Frame")
+TargetHUDHPBG.Size = UDim2.new(1, -80, 0, 8)
+TargetHUDHPBG.Position = UDim2.new(0, 68, 0, 48)
+TargetHUDHPBG.BackgroundColor3 = ThemeColors.ControlBG
+AddCorner(TargetHUDHPBG, 4)
+TargetHUDHPBG.Parent = TargetHUDFrame
+
+local TargetHUDHPFill = Instance.new("Frame")
+TargetHUDHPFill.Size = UDim2.new(1, 0, 1, 0)
+TargetHUDHPFill.BackgroundColor3 = Color3.fromRGB(40, 255, 120)
+AddCorner(TargetHUDHPFill, 4)
+TargetHUDHPFill.Parent = TargetHUDHPBG
+
 -- Floating Quick-Toggle Pill
 local OpenToggleButton = Instance.new("TextButton")
 OpenToggleButton.Size = UDim2.new(0, 50, 0, 50)
@@ -503,8 +568,8 @@ table.insert(ThemeElements, {inst = ToggleStroke, prop = "Color"})
 
 -- Main Hub Container
 local MainFrame = Instance.new("CanvasGroup")
-MainFrame.Size = UDim2.new(0, 590, 0, 435)
-MainFrame.Position = UDim2.new(0.5, -295, 0.5, -217)
+MainFrame.Size = UDim2.new(0, 640, 0, 445)
+MainFrame.Position = UDim2.new(0.5, -320, 0.5, -222)
 MainFrame.BackgroundColor3 = ThemeColors.Background
 MainFrame.BorderSizePixel = 0
 MainFrame.GroupTransparency = 0
@@ -528,13 +593,13 @@ BrandDot.Parent = Topbar
 table.insert(ThemeElements, {inst = BrandDot, prop = "BackgroundColor3"})
 
 local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(0, 310, 1, 0)
+Title.Size = UDim2.new(0, 380, 1, 0)
 Title.Position = UDim2.new(0, 40, 0, 0)
 Title.BackgroundTransparency = 1
-Title.Text = "QUANTUM HUB // v3.5 ULTIMATE"
+Title.Text = "QUANTUM HUB // v4.0 CUSTOM RIG & SKIN EDITION"
 Title.TextColor3 = ThemeColors.TextWhite
 Title.Font = Enum.Font.GothamBold
-Title.TextSize = 15
+Title.TextSize = 14
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.Parent = Topbar
 
@@ -569,7 +634,7 @@ TrackConnection(CloseButton.MouseLeave:Connect(function()
     TweenService:Create(CloseButton, TweenInfo.new(0.2), {BackgroundColor3 = ThemeColors.ControlBG}):Play()
 end))
 
--- 5-Tab Horizontal Pill Navigation Bar
+-- 6-Tab Horizontal Pill Navigation Bar
 local Navbar = Instance.new("Frame")
 Navbar.Size = UDim2.new(1, -40, 0, 38)
 Navbar.Position = UDim2.new(0, 20, 0, 54)
@@ -604,7 +669,7 @@ AddStroke(BottomBar, Color3.fromRGB(32, 36, 52), 1)
 BottomBar.Parent = MainFrame
 
 local FPSLabel = Instance.new("TextLabel")
-FPSLabel.Size = UDim2.new(0, 95, 1, 0)
+FPSLabel.Size = UDim2.new(0, 90, 1, 0)
 FPSLabel.Position = UDim2.new(0, 14, 0, 0)
 FPSLabel.BackgroundTransparency = 1
 FPSLabel.Text = "FPS: 60"
@@ -616,7 +681,7 @@ FPSLabel.Parent = BottomBar
 
 local PingLabel = Instance.new("TextLabel")
 PingLabel.Size = UDim2.new(0, 110, 1, 0)
-PingLabel.Position = UDim2.new(0, 105, 0, 0)
+PingLabel.Position = UDim2.new(0, 100, 0, 0)
 PingLabel.BackgroundTransparency = 1
 PingLabel.Text = "Ping: --"
 PingLabel.TextColor3 = ThemeColors.TextGray
@@ -626,8 +691,8 @@ PingLabel.TextXAlignment = Enum.TextXAlignment.Left
 PingLabel.Parent = BottomBar
 
 local TargetStatusLabel = Instance.new("TextLabel")
-TargetStatusLabel.Size = UDim2.new(0, 165, 1, 0)
-TargetStatusLabel.Position = UDim2.new(0, 215, 0, 0)
+TargetStatusLabel.Size = UDim2.new(0, 195, 1, 0)
+TargetStatusLabel.Position = UDim2.new(0, 210, 0, 0)
 TargetStatusLabel.BackgroundTransparency = 1
 TargetStatusLabel.Text = "Locked: None"
 TargetStatusLabel.TextColor3 = ThemeColors.TextGray
@@ -637,10 +702,10 @@ TargetStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 TargetStatusLabel.Parent = BottomBar
 
 local EntitiesLabel = Instance.new("TextLabel")
-EntitiesLabel.Size = UDim2.new(0, 165, 1, 0)
-EntitiesLabel.Position = UDim2.new(1, -178, 0, 0)
+EntitiesLabel.Size = UDim2.new(0, 185, 1, 0)
+EntitiesLabel.Position = UDim2.new(1, -198, 0, 0)
 EntitiesLabel.BackgroundTransparency = 1
-EntitiesLabel.Text = "Players: 0 | Bots: 0"
+EntitiesLabel.Text = "Players: 0 | Bots/Rigs: 0"
 EntitiesLabel.TextColor3 = Themes[QuantumConfig.Theme]
 EntitiesLabel.Font = Enum.Font.GothamSemibold
 EntitiesLabel.TextSize = 11
@@ -654,7 +719,7 @@ local currentTabName = ""
 local function CreateTab(name, order)
     local TabButton = Instance.new("TextButton")
     TabButton.LayoutOrder = order
-    TabButton.Size = UDim2.new(0, 104, 0, 28)
+    TabButton.Size = UDim2.new(0, 92, 0, 28)
     TabButton.BackgroundColor3 = ThemeColors.NavBG
     TabButton.Text = name
     TabButton.TextColor3 = ThemeColors.TextGray
@@ -711,7 +776,7 @@ local function CreateTab(name, order)
 end
 
 -----------------------------------
--- 5. MODERN CARD-BASED COMPONENTS (WITH DETECTION WARNINGS)
+-- 5. MODERN CARD-BASED COMPONENTS
 -----------------------------------
 local nextOrder = 0
 local function GetOrder()
@@ -915,7 +980,7 @@ local function CreateSlider(parent, name, min, max, configKey, isFloat, callback
             FrameStroke.Color = ThemeColors.DangerRed
             if not warnedAlready then
                 warnedAlready = true
-                Notify("⚠ High Detection Risk", name .. " is over " .. tostring(warnThreshold) .. "%! Hard-locking can trigger anti-cheat.", 3.0, true)
+                Notify("⚠ High Detection Risk", name .. " is over " .. tostring(warnThreshold) .. "! Hard-locking can trigger anti-cheat.", 3.0, true)
             end
         else
             warnedAlready = false
@@ -1034,29 +1099,38 @@ local function CreateCycle(parent, name, options, configKey, isThemeCycle)
     ValueText.TextColor3 = Themes[QuantumConfig.Theme]
     ValueText.Font = Enum.Font.GothamBold
     ValueText.TextSize = 11
+    ValueText.TextTruncate = Enum.TextTruncate.AtEnd
     ValueText.Parent = ValueBox
     table.insert(ThemeElements, {inst = ValueText, prop = "TextColor3"})
     
     local index = 1
     local function SyncCycleState()
+        if #options == 0 then
+            ValueText.Text = "None"
+            return
+        end
         for i, opt in ipairs(options) do
             if opt == QuantumConfig[configKey] then 
                 index = i 
                 break 
             end
         end
-        ValueText.Text = options[index]
+        if index > #options then index = 1 end
+        ValueText.Text = tostring(options[index])
     end
     SyncCycleState()
     table.insert(UIControlRefreshers, SyncCycleState)
     
     TrackConnection(Frame.MouseButton1Click:Connect(function()
+        if #options == 0 then return end
         index = (index % #options) + 1
         QuantumConfig[configKey] = options[index]
-        ValueText.Text = options[index]
+        ValueText.Text = tostring(options[index])
         if isThemeCycle then UpdateTheme() end
         if configKey == "WorldTheme" then UpdateWorld() end
     end))
+
+    return SyncCycleState
 end
 
 local function CreateKeybindPicker(parent, name)
@@ -1109,7 +1183,7 @@ local function CreateKeybindPicker(parent, name)
         ValueText.Text = "[Press Any Key...]"
     end))
 
-    TrackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    TrackConnection(UserInputService.InputBegan:Connect(function(input)
         if not BindingKey then return end
         if input.UserInputType == Enum.UserInputType.Keyboard then
             if input.KeyCode ~= Enum.KeyCode.Unknown and input.KeyCode ~= Enum.KeyCode.RightShift then
@@ -1279,13 +1353,13 @@ local function ToggleMenu()
         MainFrame.Active = true
         TweenService:Create(MainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
             GroupTransparency = 0,
-            Size = UDim2.new(0, 590, 0, 435)
+            Size = UDim2.new(0, 640, 0, 445)
         }):Play()
     else
         MainFrame.Active = false
         TweenService:Create(MainFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
             GroupTransparency = 1,
-            Size = UDim2.new(0, 560, 0, 410)
+            Size = UDim2.new(0, 610, 0, 415)
         }):Play()
         task.delay(0.2, function()
             if not QuantumConfig.MenuOpen then
@@ -1342,6 +1416,23 @@ TrackConnection(Topbar.InputEnded:Connect(function(input)
     end
 end))
 
+local draggingHUD = false
+local hudDragStart, hudStartPos
+
+TrackConnection(TargetHUDFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingHUD = true
+        hudDragStart = input.Position
+        hudStartPos = TargetHUDFrame.Position
+    end
+end))
+
+TrackConnection(TargetHUDFrame.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingHUD = false
+    end
+end))
+
 TrackConnection(UserInputService.InputChanged:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
         if draggingToggle then
@@ -1362,18 +1453,198 @@ TrackConnection(UserInputService.InputChanged:Connect(function(input)
             TweenService:Create(MainFrame, TweenInfo.new(0.08, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
                 Position = targetGoal
             }):Play()
+        elseif draggingHUD then
+            local delta = input.Position - hudDragStart
+            TargetHUDFrame.Position = UDim2.new(
+                hudStartPos.X.Scale, hudStartPos.X.Offset + delta.X,
+                hudStartPos.Y.Scale, hudStartPos.Y.Offset + delta.Y
+            )
         end
     end
 end))
 
 -----------------------------------
--- 7. POPULATE 5 TABS (WITH WARNING BADGES)
+-- 7. UNIVERSAL CUSTOM SKIN & RIG ENGINE
+-----------------------------------
+local CustomSkinSubNames = {
+    ["skin"] = true, ["rig"] = true, ["visual"] = true, ["visuals"] = true,
+    ["morph"] = true, ["character"] = true, ["charactermodel"] = true,
+    ["customrig"] = true, ["mesh"] = true, ["body"] = true, ["armor"] = true,
+    ["costume"] = true, ["outfit"] = true
+}
+
+local RootCandidateNames = {
+    "HumanoidRootPart", "RootPart", "Root", "Torso", "UpperTorso", "LowerTorso",
+    "Pelvis", "Hips", "Core", "Center", "Chassis", "Main", "Body", "Hitbox", "Collider"
+}
+
+local HeadCandidateNames = {
+    "Head", "HeadHitbox", "FakeHead", "Skull", "Cranium", "Face", "Helmet", "Crit", "Top"
+}
+
+local function GetCharacterHumanoid(char)
+    if not char then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid") or char:FindFirstChild("Humanoid")
+    if hum then return hum end
+    if QuantumConfig.CustomRigSupport then
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("Model") and CustomSkinSubNames[string.lower(child.Name)] then
+                local subHum = child:FindFirstChildOfClass("Humanoid")
+                if subHum then return subHum end
+            end
+        end
+    end
+    return nil
+end
+
+local function InspectAndCacheCustomRig(char)
+    if not char then return nil end
+    local cached = RigCache[char]
+    if cached and (tick() - cached.Timestamp < 1.5) and cached.Root and cached.Root.Parent then
+        return cached
+    end
+
+    local data = {
+        Timestamp = tick(),
+        Root = nil,
+        Head = nil,
+        HeadBone = nil,
+        Bones = {},
+        MotorJoints = {}
+    }
+
+    local hum = GetCharacterHumanoid(char)
+    if hum and hum.RootPart and hum.RootPart:IsA("BasePart") then
+        data.Root = hum.RootPart
+    end
+
+    if not data.Root then
+        for _, rName in ipairs(RootCandidateNames) do
+            local p = char:FindFirstChild(rName, true)
+            if p and p:IsA("BasePart") then
+                data.Root = p
+                break
+            end
+        end
+    end
+
+    if not data.Root and char:IsA("Model") and char.PrimaryPart then
+        data.Root = char.PrimaryPart
+    end
+
+    for _, hName in ipairs(HeadCandidateNames) do
+        local p = char:FindFirstChild(hName, true)
+        if p then
+            if p:IsA("BasePart") then
+                data.Head = p
+                break
+            elseif p:IsA("Bone") then
+                data.HeadBone = p
+                break
+            end
+        end
+    end
+
+    local highestPart = nil
+    local highestY = -math.huge
+    local largestPart = nil
+    local largestVol = -1
+
+    for _, desc in ipairs(char:GetDescendants()) do
+        if desc:IsA("BasePart") then
+            local vol = desc.Size.X * desc.Size.Y * desc.Size.Z
+            if vol > largestVol and desc.Name ~= "Handle" then
+                largestVol = vol
+                largestPart = desc
+            end
+            if desc.Position.Y > highestY and desc.Name ~= "Handle" then
+                highestY = desc.Position.Y
+                highestPart = desc
+            end
+        elseif desc:IsA("Bone") then
+            table.insert(data.Bones, desc)
+            local lowerBone = string.lower(desc.Name)
+            if not data.HeadBone and (string.find(lowerBone, "head") or string.find(lowerBone, "skull") or string.find(lowerBone, "neck")) then
+                data.HeadBone = desc
+            end
+        elseif (desc:IsA("Motor6D") or desc:IsA("Weld")) and desc.Part0 and desc.Part1 then
+            if desc.Part0.Parent ~= desc.Part1 and not string.find(string.lower(desc.Part1.Name), "handle") then
+                table.insert(data.MotorJoints, {desc.Part0, desc.Part1})
+            end
+        end
+    end
+
+    if not data.Root then
+        data.Root = largestPart or highestPart
+    end
+    if not data.Head then
+        data.Head = highestPart or data.Root
+    end
+
+    RigCache[char] = data
+    return data
+end
+
+local function GetCharacterRoot(char)
+    if not char then return nil end
+    local fastRoot = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso")
+    if fastRoot and fastRoot:IsA("BasePart") then
+        return fastRoot
+    end
+    local rigData = InspectAndCacheCustomRig(char)
+    return rigData and rigData.Root or nil
+end
+
+local function GetCharacterHead(char)
+    if not char then return nil end
+    local fastHead = char:FindFirstChild("Head")
+    if fastHead and fastHead:IsA("BasePart") then
+        return fastHead
+    end
+    local rigData = InspectAndCacheCustomRig(char)
+    return (rigData and rigData.Head) or GetCharacterRoot(char)
+end
+
+local function GetHeadWorldPosition(char)
+    local rigData = InspectAndCacheCustomRig(char)
+    if rigData and rigData.HeadBone and rigData.HeadBone.Parent then
+        local ok, pos = pcall(function() return rigData.HeadBone.TransformedWorldCFrame.Position end)
+        if ok and pos then return pos end
+    end
+    local headPart = GetCharacterHead(char)
+    if headPart then
+        return headPart.Position
+    end
+    local rootPart = GetCharacterRoot(char)
+    return rootPart and (rootPart.Position + Vector3.new(0, 2.2, 0)) or Vector3.zero
+end
+
+local function GetCharacterBounds(char, rootPart)
+    local headPos = GetHeadWorldPosition(char)
+    local topWorld = headPos + Vector3.new(0, 0.85, 0)
+    local botWorld = rootPart.Position - Vector3.new(0, 3.0, 0)
+
+    if QuantumConfig.CustomRigSupport and char:IsA("Model") then
+        local ok, cf, size = pcall(function() return char:GetBoundingBox() end)
+        if ok and cf and size and size.Y > 1.5 and size.Y < 45 then
+            local halfY = math.clamp(size.Y * 0.5, 1.5, 20)
+            topWorld = cf.Position + Vector3.new(0, halfY, 0)
+            botWorld = cf.Position - Vector3.new(0, halfY, 0)
+        end
+    end
+
+    return topWorld, botWorld, headPos
+end
+
+-----------------------------------
+-- 8. POPULATE 6 TABS
 -----------------------------------
 local CombatTab = CreateTab("Combat", 1)
 local VisualsTab = CreateTab("Visuals", 2)
 local MovementTab = CreateTab("Movement", 3)
-local WorldTab = CreateTab("World", 4)
-local SettingsTab = CreateTab("Settings", 5)
+local TeleportsTab = CreateTab("Teleports", 4)
+local WorldTab = CreateTab("World", 5)
+local SettingsTab = CreateTab("Settings", 6)
 
 currentTabName = "Combat"
 Tabs["Combat"].Button.BackgroundColor3 = Themes[QuantumConfig.Theme]
@@ -1381,7 +1652,7 @@ Tabs["Combat"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
 Tabs["Combat"].Frame.Visible = true
 
 -- 1. Combat Elements
-CreateSectionHeader(CombatTab, "Aimbot & Silent Aim")
+CreateSectionHeader(CombatTab, "Aimbot & Silent Aim (Custom Rig Compatible)")
 CreateToggle(CombatTab, "Enable Camera Aimbot", "Aimbot")
 CreateKeybindPicker(CombatTab, "Aimbot Hold Keybind")
 CreateSlider(CombatTab, "Aimbot Lock Speed", 1, 100, "Smoothness", false, nil, 70, "⚠ DETECTABLE >70%")
@@ -1390,7 +1661,8 @@ CreateToggle(CombatTab, "Universal Silent Aim", "SilentAim", nil, "⚠ DETECTABL
 CreateCycle(CombatTab, "Silent Aim Target Part", {"Head", "HumanoidRootPart", "Random", "Closest"}, "SilentAimPart", false)
 CreateSlider(CombatTab, "Silent Aim Hit Chance (%)", 1, 100, "HitChance", false)
 
-CreateSectionHeader(CombatTab, "Targeting, FOV & Prediction")
+CreateSectionHeader(CombatTab, "Target HUD, FOV & Prediction")
+CreateToggle(CombatTab, "Show Floating Target HUD Card", "ShowTargetHUD")
 CreateToggle(CombatTab, "Show Target Lock Snapline & Ring", "ShowTargetLine")
 CreateToggle(CombatTab, "Wall Check (Visible Only)", "WallCheck")
 CreateToggle(CombatTab, "Prioritize Enemies Behind Walls", "PrioritizeBehindWalls", nil, "⚠ BLATANT")
@@ -1400,32 +1672,42 @@ CreateToggle(CombatTab, "Show FOV Circle", "ShowFOV")
 CreateToggle(CombatTab, "Filled Translucent FOV Circle", "FilledFOV")
 CreateSlider(CombatTab, "FOV Radius (px)", 30, 800, "FOVRadius", false)
 
-CreateSectionHeader(CombatTab, "TriggerBot (Auto Shoot) & Hitbox")
+CreateSectionHeader(CombatTab, "TriggerBot & Custom Skin Hitbox Expander")
 CreateToggle(CombatTab, "Enable TriggerBot (Crosshair Auto Shoot)", "TriggerBot")
 CreateToggle(CombatTab, "Auto-Shoot on Silent Aim Lock", "TriggerWithSilentAim", nil, "⚠ DETECTABLE")
 CreateSlider(CombatTab, "TriggerBot Fire Delay (Secs)", 0, 1, "TriggerDelay", true)
-CreateToggle(CombatTab, "Universal Hitbox Expander", "HitboxExpander", nil, "⚠ DETECTABLE")
+CreateToggle(CombatTab, "Universal Hitbox Expander (All Rigs)", "HitboxExpander", nil, "⚠ DETECTABLE")
 CreateCycle(CombatTab, "Hitbox Target Part", {"HumanoidRootPart", "Head", "Torso"}, "HitboxPart", false)
 CreateSlider(CombatTab, "Hitbox Size (Studs)", 2, 50, "HitboxSize", false, nil, 15, "⚠ BLATANT >15")
 CreateSlider(CombatTab, "Hitbox Transparency", 0.1, 1, "HitboxTransparency", true)
 
 -- 2. Visuals Elements
-CreateSectionHeader(VisualsTab, "Player & Bot ESP (Undetected Drawing)")
-CreateToggle(VisualsTab, "2D Box ESP", "BoxESP")
+CreateSectionHeader(VisualsTab, "Player, Custom Skin & Bot ESP")
+CreateToggle(VisualsTab, "2D Full Box ESP", "BoxESP")
+CreateToggle(VisualsTab, "2D Segmented Corner Box ESP", "CornerBoxESP")
+CreateToggle(VisualsTab, "Translucent Filled Box ESP", "FilledBoxESP")
 CreateToggle(VisualsTab, "Name & Distance ESP", "NameESP")
 CreateToggle(VisualsTab, "Side Health Bar ESP", "HealthESP")
-CreateToggle(VisualsTab, "Head Dot ESP", "HeadDotESP")
-CreateToggle(VisualsTab, "2D Skeleton ESP (R15 & R6)", "SkeletonESP")
+CreateToggle(VisualsTab, "Head / Bone Dot ESP", "HeadDotESP")
+CreateToggle(VisualsTab, "Universal Skeleton ESP (R15/R6/Bones/Custom)", "SkeletonESP")
 CreateToggle(VisualsTab, "Snapline Tracers", "Tracers")
 CreateCycle(VisualsTab, "Tracer Origin Point", {"Bottom", "Center", "Mouse"}, "TracerOrigin", false)
-CreateToggle(VisualsTab, "Highlight Chams ESP", "ChamsESP")
+CreateToggle(VisualsTab, "Deep Highlight Chams (Includes Sub-Skins)", "ChamsESP")
+
+CreateSectionHeader(VisualsTab, "Off-Screen Arrows & Custom Crosshair")
+CreateToggle(VisualsTab, "Out-of-FOV Directional Arrows", "OffScreenArrows")
+CreateSlider(VisualsTab, "Off-Screen Arrow Radius (px)", 80, 500, "ArrowRadius", false)
+CreateToggle(VisualsTab, "Custom Drawing Crosshair", "CustomCrosshair")
+CreateToggle(VisualsTab, "Spinning Crosshair Animation", "CrosshairSpin")
+CreateSlider(VisualsTab, "Crosshair Line Length", 4, 35, "CrosshairSize", false)
+CreateSlider(VisualsTab, "Crosshair Center Gap", 0, 25, "CrosshairGap", false)
 
 CreateSectionHeader(VisualsTab, "ESP Color & Range")
 CreateToggle(VisualsTab, "Rainbow Chroma ESP (Auto-Cycle)", "RainbowESP")
 CreateSlider(VisualsTab, "Max Render Distance (Studs)", 100, 5000, "MaxDistance", false)
 CreateHueSpectrum(VisualsTab, "Master ESP Color", "ESP_Color")
 
--- 3. Movement & LocalPlayer Elements (Marked with Anti-Cheat Warnings)
+-- 3. Movement Elements
 CreateSectionHeader(MovementTab, "Speed & Jump Overrides (High Detection Risk)")
 CreateToggle(MovementTab, "Custom WalkSpeed", "CustomWalkSpeed", nil, "⚠ DETECTABLE")
 CreateSlider(MovementTab, "WalkSpeed Value", 16, 250, "WalkSpeed", false, nil, 35, "⚠ HIGH RISK >35")
@@ -1448,10 +1730,79 @@ CreateToggle(MovementTab, "Noclip (Walk Through Walls)", "Noclip", function(enab
 end, "⚠ DETECTABLE")
 CreateToggle(MovementTab, "SpinBot (Anti-Aim Rotation)", "SpinBot", nil, "⚠ BLATANT")
 CreateSlider(MovementTab, "SpinBot Speed", 5, 100, "SpinSpeed", false)
+CreateToggle(MovementTab, "Click Teleport (Hold LeftAlt + Click)", "ClickTP", nil, "⚠ DETECTABLE")
 CreateToggle(MovementTab, "Override Camera FOV", "CustomCameraFOV")
 CreateSlider(MovementTab, "Camera FOV Value", 40, 120, "CameraFOV", false)
 
--- 4. World Elements
+-- 4. Teleports & Spectate Elements
+local TargetSelectOptions = {"None"}
+CreateSectionHeader(TeleportsTab, "Player & Custom Rig Spectate / Teleport")
+local RefreshTargetCycle = CreateCycle(TeleportsTab, "Select Active Entity", TargetSelectOptions, "SelectedTargetName", false)
+
+CreateToggle(TeleportsTab, "Spectate Selected Entity", "SpectateTarget", function(enabled)
+    if not enabled and LocalPlayer.Character then
+        local hum = GetCharacterHumanoid(LocalPlayer.Character)
+        if hum then Camera.CameraSubject = hum end
+    end
+end)
+
+CreateSlider(TeleportsTab, "Teleport Behind Offset (Studs)", 0, 15, "TeleportOffsetZ", false)
+
+CreateActionButton(TeleportsTab, "Teleport To Selected Entity", "TELEPORT", function()
+    local lChar = LocalPlayer.Character
+    local lRoot = lChar and GetCharacterRoot(lChar)
+    if not lRoot then return end
+
+    for model, ent in pairs(ActiveEntities) do
+        if ent.Name == QuantumConfig.SelectedTargetName or model.Name == QuantumConfig.SelectedTargetName then
+            local tRoot = GetCharacterRoot(model)
+            if tRoot then
+                lRoot.CFrame = tRoot.CFrame * CFrame.new(0, 0, QuantumConfig.TeleportOffsetZ)
+                Notify("Teleported", "Teleported to " .. ent.Name, 2.5, false)
+                return
+            end
+        end
+    end
+    Notify("Target Not Found", "Cycle to an active entity first.", 2.5, true)
+end)
+
+CreateActionButton(TeleportsTab, "Teleport To Locked Aimbot Target", "TP LOCKED", function()
+    local lChar = LocalPlayer.Character
+    local lRoot = lChar and GetCharacterRoot(lChar)
+    if lRoot and CachedBestTarget then
+        local tRoot = GetCharacterRoot(CachedBestTarget)
+        if tRoot then
+            lRoot.CFrame = tRoot.CFrame * CFrame.new(0, 0, QuantumConfig.TeleportOffsetZ)
+            Notify("Teleported", "Teleported behind locked target!", 2.5, false)
+            return
+        end
+    end
+    Notify("No Locked Target", "Lock onto a target inside FOV first.", 2.5, true)
+end)
+
+CreateSectionHeader(TeleportsTab, "Custom Saved Waypoints")
+for slotIdx = 1, 3 do
+    CreateActionButton(TeleportsTab, "Save Current Position -> Waypoint #" .. slotIdx, "SAVE #" .. slotIdx, function()
+        local lChar = LocalPlayer.Character
+        local lRoot = lChar and GetCharacterRoot(lChar)
+        if lRoot then
+            SavedWaypoints[slotIdx] = lRoot.CFrame
+            Notify("Waypoint #" .. slotIdx .. " Saved", string.format("Coords: %d, %d, %d", lRoot.Position.X, lRoot.Position.Y, lRoot.Position.Z), 2.5, false)
+        end
+    end)
+    CreateActionButton(TeleportsTab, "Teleport To Waypoint #" .. slotIdx, "GOTO #" .. slotIdx, function()
+        local lChar = LocalPlayer.Character
+        local lRoot = lChar and GetCharacterRoot(lChar)
+        if lRoot and SavedWaypoints[slotIdx] then
+            lRoot.CFrame = SavedWaypoints[slotIdx]
+            Notify("Teleported", "Warped to Waypoint #" .. slotIdx, 2.5, false)
+        else
+            Notify("Waypoint Empty", "Save Waypoint #" .. slotIdx .. " before teleporting.", 2.5, true)
+        end
+    end)
+end
+
+-- 5. World Elements
 CreateSectionHeader(WorldTab, "Atmosphere & Sky")
 CreateCycle(WorldTab, "Sky & Atmosphere Preset", WorldOptionsList, "WorldTheme", false)
 CreateToggle(WorldTab, "Fullbright (Maximum Visibility)", "Fullbright")
@@ -1460,16 +1811,18 @@ CreateSlider(WorldTab, "Moon Angular Size", 0, 100, "MoonSize", false)
 CreateSlider(WorldTab, "World Brightness", 0, 10, "Brightness", true)
 CreateToggle(WorldTab, "Quantum Character Aura", "QuantumAura")
 
--- 5. Settings Elements
-CreateSectionHeader(SettingsTab, "Universal Deep-Workspace AI & Bot Scanner")
+-- 6. Settings Elements
+CreateSectionHeader(SettingsTab, "Universal Custom Rig, Skin & Bot Scanner")
+CreateToggle(SettingsTab, "Universal Custom Skin & Rig Resolver", "CustomRigSupport")
 CreateToggle(SettingsTab, "Target & Render All Game Bots / AI / NPCs", "IncludeBots")
 CreateToggle(SettingsTab, "Universal Team Check (Players & AI)", "TeamCheck")
 CreateToggle(SettingsTab, "Ignore Spawn ForceField Targets", "IgnoreForceField")
+CreateToggle(SettingsTab, "Anti-AFK (Prevent 20-Min Idle Kick)", "AntiAFK")
 
 CreateSectionHeader(SettingsTab, "Configuration & Server Utilities")
 CreateCycle(SettingsTab, "Interface Accent Theme", ThemeOptionsList, "Theme", true)
 
-local ConfigFileName = "QuantumHub_Universal_v35.json"
+local ConfigFileName = "QuantumHub_Universal_v40.json"
 CreateActionButton(SettingsTab, "Save Current Configuration", "SAVE", function()
     if type(writefile) == "function" then
         local exportData = {}
@@ -1536,43 +1889,66 @@ CreateActionButton(SettingsTab, "Server Hop (Find New Server)", "HOP", function(
 end)
 
 -----------------------------------
--- 8. DEEP-WORKSPACE UNIVERSAL AI, BOT & PLAYER ENGINE
+-- 9. DEEP-WORKSPACE ENTITY & CUSTOM RIG LOGIC
 -----------------------------------
-local function GetCharacterHumanoid(char)
-    if not char then return nil end
-    return char:FindFirstChildOfClass("Humanoid") or char:FindFirstChild("Humanoid")
-end
-
-local function GetCharacterRoot(char)
-    if not char then return nil end
-    local root = char:FindFirstChild("HumanoidRootPart")
-        or char:FindFirstChild("Torso")
-        or char:FindFirstChild("UpperTorso")
-        or char:FindFirstChild("LowerTorso")
-        or char:FindFirstChild("RootPart")
-        or char:FindFirstChild("Root")
-        or char:FindFirstChild("Hitbox")
-        or char:FindFirstChild("Body")
-        or char.PrimaryPart
-        or char:FindFirstChild("Head")
-
-    if root and root:IsA("BasePart") then
-        return root
+-- Persistent Quantum Aura Handler
+task.spawn(function()
+    while not IsUnloaded do
+        pcall(function()
+            local char = LocalPlayer.Character
+            local hrp = char and GetCharacterRoot(char)
+            if hrp then
+                local emitter = hrp:FindFirstChild("QuantumAuraEmitter")
+                if QuantumConfig.QuantumAura then
+                    if not emitter then
+                        emitter = Instance.new("ParticleEmitter")
+                        emitter.Name = "QuantumAuraEmitter"
+                        emitter.Size = NumberSequence.new(0.5, 0)
+                        emitter.Texture = "rbxassetid://243098098"
+                        emitter.Lifetime = NumberRange.new(0.8)
+                        emitter.Rate = 28
+                        emitter.Speed = NumberRange.new(2.5)
+                        emitter.Parent = hrp
+                    end
+                    emitter.Color = ColorSequence.new(Themes[QuantumConfig.Theme])
+                    emitter.Enabled = true
+                elseif emitter then
+                    emitter.Enabled = false
+                end
+            end
+        end)
+        task.wait(0.25)
     end
-    return char:FindFirstChildWhichIsA("BasePart")
-end
+end)
 
-local function GetCharacterHead(char)
-    if not char then return nil end
-    local head = char:FindFirstChild("Head")
-        or char:FindFirstChild("HeadHitbox")
-        or char:FindFirstChild("FakeHead")
-        or char:FindFirstChild("Crit")
-    if head and head:IsA("BasePart") then
-        return head
+-- Anti-AFK Handler
+TrackConnection(LocalPlayer.Idled:Connect(function()
+    if not IsUnloaded and QuantumConfig.AntiAFK then
+        pcall(function()
+            if VirtualUser then
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.zero)
+            elseif VirtualInputManager then
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.RightControl, false, game)
+                task.wait(0.05)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.RightControl, false, game)
+            end
+        end)
     end
-    return GetCharacterRoot(char)
-end
+end))
+
+-- Click-Teleport Handler (Hold LeftAlt + MouseButton1)
+TrackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and not IsUnloaded and QuantumConfig.ClickTP then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 and UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt) then
+            local lChar = LocalPlayer.Character
+            local lRoot = lChar and GetCharacterRoot(lChar)
+            if lRoot and Mouse.Hit then
+                lRoot.CFrame = CFrame.new(Mouse.Hit.Position + Vector3.new(0, 3.2, 0))
+            end
+        end
+    end
+end))
 
 local function GetEntityHealthAndMax(char)
     if not char then return 0, 0 end
@@ -1585,15 +1961,15 @@ local function GetEntityHealthAndMax(char)
         end
     end
 
-    local attrHp = char:GetAttribute("Health") or char:GetAttribute("HP") or char:GetAttribute("CurrentHealth")
+    local attrHp = char:GetAttribute("Health") or char:GetAttribute("HP") or char:GetAttribute("CurrentHealth") or char:GetAttribute("Shield")
     local attrMax = char:GetAttribute("MaxHealth") or char:GetAttribute("MaxHP") or 100
     if type(attrHp) == "number" then
         return attrHp, (type(attrMax) == "number" and attrMax > 0) and attrMax or 100
     end
 
-    local hpObj = char:FindFirstChild("Health") or char:FindFirstChild("HP")
+    local hpObj = char:FindFirstChild("Health", true) or char:FindFirstChild("HP", true)
     if hpObj and (hpObj:IsA("NumberValue") or hpObj:IsA("IntValue")) then
-        local maxObj = char:FindFirstChild("MaxHealth") or char:FindFirstChild("MaxHP")
+        local maxObj = char:FindFirstChild("MaxHealth", true) or char:FindFirstChild("MaxHP", true)
         local maxVal = (maxObj and (maxObj:IsA("NumberValue") or maxObj:IsA("IntValue"))) and maxObj.Value or 100
         return hpObj.Value, math.max(maxVal, 1)
     end
@@ -1604,8 +1980,24 @@ end
 local IgnoredAncestorNames = {
     ["corpses"] = true, ["ragdolls"] = true, ["dead"] = true, ["debris"] = true,
     ["viewmodel"] = true, ["camera"] = true, ["ignore"] = true, ["effects"] = true,
-    ["weapons"] = true, ["dropped"] = true, ["items"] = true, ["shop"] = true
+    ["weapons"] = true, ["dropped"] = true, ["items"] = true, ["shop"] = true,
+    ["lobby"] = true, ["map"] = true, ["props"] = true, ["scenery"] = true
 }
+
+local function GetTopCharacterContainer(model)
+    local curr = model
+    while curr.Parent and curr.Parent:IsA("Model") and curr.Parent ~= workspace do
+        local pLower = string.lower(curr.Parent.Name)
+        if CustomSkinSubNames[string.lower(curr.Name)] or curr.Parent:FindFirstChildOfClass("Humanoid") or Players:GetPlayerFromCharacter(curr.Parent) then
+            curr = curr.Parent
+        elseif pLower ~= "characters" and pLower ~= "players" and pLower ~= "enemies" and pLower ~= "bots" and pLower ~= "npcs" and pLower ~= "entities" and pLower ~= "live" then
+            break
+        else
+            break
+        end
+    end
+    return curr
+end
 
 local function HasValidAncestorPath(model)
     local curr = model.Parent
@@ -1617,7 +2009,7 @@ local function HasValidAncestorPath(model)
         if IgnoredAncestorNames[lowerName] then
             return false
         end
-        if curr:IsA("Model") and curr:FindFirstChildOfClass("Humanoid") then
+        if curr:IsA("Model") and (curr:FindFirstChildOfClass("Humanoid") or Players:GetPlayerFromCharacter(curr)) then
             return false
         end
         curr = curr.Parent
@@ -1631,12 +2023,13 @@ local function IsValidBotModel(model)
     if not HasValidAncestorPath(model) then return false end
 
     local hum = GetCharacterHumanoid(model)
-    local animCtrl = model:FindFirstChildOfClass("AnimationController")
+    local animCtrl = model:FindFirstChildOfClass("AnimationController") or model:FindFirstChildWhichIsA("Animator", true)
     local hasHealthData = (model:GetAttribute("Health") ~= nil) or (model:GetAttribute("HP") ~= nil) or (model:FindFirstChild("Health") ~= nil)
-    local hasStandardRig = (model:FindFirstChild("Head") ~= nil) and (
-        model:FindFirstChild("HumanoidRootPart") ~= nil or
-        model:FindFirstChild("Torso") ~= nil or
-        model:FindFirstChild("UpperTorso") ~= nil
+    local hasStandardRig = (model:FindFirstChild("Head", true) ~= nil) and (
+        model:FindFirstChild("HumanoidRootPart", true) ~= nil or
+        model:FindFirstChild("Torso", true) ~= nil or
+        model:FindFirstChild("UpperTorso", true) ~= nil or
+        model:FindFirstChildWhichIsA("Bone", true) ~= nil
     )
 
     if not (hum or animCtrl or hasHealthData or hasStandardRig) then
@@ -1707,7 +2100,8 @@ end
 local function IsVisible(targetPart, targetChar)
     if not targetPart then return false end
     local origin = Camera.CFrame.Position
-    local displacement = targetPart.Position - origin
+    local targetPos = (typeof(targetPart) == "Vector3") and targetPart or targetPart.Position
+    local displacement = targetPos - origin
     local distance = displacement.Magnitude
     if distance < 1 then return true end
 
@@ -1725,14 +2119,17 @@ local function EvaluateInstanceForBot(inst)
     local candidateModel = nil
     if inst:IsA("Humanoid") or inst:IsA("AnimationController") then
         candidateModel = inst.Parent
-    elseif inst:IsA("BasePart") and (inst.Name == "HumanoidRootPart" or inst.Name == "Head") then
+    elseif inst:IsA("Bone") then
+        candidateModel = inst:FindFirstAncestorOfClass("Model")
+    elseif inst:IsA("BasePart") and (inst.Name == "HumanoidRootPart" or inst.Name == "Head" or inst.Name == "RootPart") then
         candidateModel = inst.Parent
     elseif inst:IsA("Model") then
         candidateModel = inst
     end
 
-    if candidateModel and candidateModel:IsA("Model") and not DiscoveredBotModels[candidateModel] then
-        if IsValidBotModel(candidateModel) then
+    if candidateModel and candidateModel:IsA("Model") then
+        candidateModel = GetTopCharacterContainer(candidateModel)
+        if not DiscoveredBotModels[candidateModel] and IsValidBotModel(candidateModel) then
             DiscoveredBotModels[candidateModel] = true
         end
     end
@@ -1740,7 +2137,7 @@ end
 
 TrackConnection(workspace.DescendantAdded:Connect(function(desc)
     if IsUnloaded or not QuantumConfig.IncludeBots then return end
-    if desc:IsA("Humanoid") or desc:IsA("AnimationController") or (desc:IsA("BasePart") and (desc.Name == "HumanoidRootPart" or desc.Name == "Head")) then
+    if desc:IsA("Humanoid") or desc:IsA("AnimationController") or desc:IsA("Bone") or (desc:IsA("BasePart") and (desc.Name == "HumanoidRootPart" or desc.Name == "Head")) then
         task.defer(function()
             pcall(EvaluateInstanceForBot, desc)
         end)
@@ -1755,10 +2152,10 @@ task.spawn(function()
                 for i = 1, #descendants do
                     if IsUnloaded or not QuantumConfig.IncludeBots then break end
                     local inst = descendants[i]
-                    if inst:IsA("Humanoid") or inst:IsA("AnimationController") or (inst:IsA("BasePart") and inst.Name == "HumanoidRootPart") then
+                    if inst:IsA("Humanoid") or inst:IsA("AnimationController") or inst:IsA("Bone") or (inst:IsA("BasePart") and inst.Name == "HumanoidRootPart") then
                         EvaluateInstanceForBot(inst)
                     end
-                    if i % 300 == 0 then
+                    if i % 350 == 0 then
                         task.wait()
                     end
                 end
@@ -1768,12 +2165,13 @@ task.spawn(function()
     end
 end)
 
-local HitboxTargetNames = {"HumanoidRootPart", "Head", "Torso", "UpperTorso"}
+-- Custom Rig Hitbox Expander
+local HitboxTargetNames = {"HumanoidRootPart", "Head", "Torso", "UpperTorso", "RootPart", "Body", "Hitbox"}
 
 local function RestoreCharacterHitboxes(char)
     if not char then return end
     for _, partName in ipairs(HitboxTargetNames) do
-        local part = char:FindFirstChild(partName)
+        local part = char:FindFirstChild(partName, true)
         if part and OriginalPartProperties[part] then
             local orig = OriginalPartProperties[part]
             pcall(function()
@@ -1797,16 +2195,18 @@ local function UpdateCharacterHitbox(char, shouldExpand, activeColor)
     end
 
     local desiredName = QuantumConfig.HitboxPart
-    local targetPart = char:FindFirstChild(desiredName)
+    local targetPart = char:FindFirstChild(desiredName, true)
     if desiredName == "Torso" and not targetPart then
-        targetPart = char:FindFirstChild("UpperTorso") or GetCharacterRoot(char)
+        targetPart = char:FindFirstChild("UpperTorso", true) or GetCharacterRoot(char)
+    elseif desiredName == "Head" and not targetPart then
+        targetPart = GetCharacterHead(char)
     end
-    if not targetPart then
+    if not targetPart or not targetPart:IsA("BasePart") then
         targetPart = GetCharacterRoot(char) or GetCharacterHead(char)
     end
 
     for _, partName in ipairs(HitboxTargetNames) do
-        local p = char:FindFirstChild(partName)
+        local p = char:FindFirstChild(partName, true)
         if p and p ~= targetPart and OriginalPartProperties[p] then
             local orig = OriginalPartProperties[p]
             pcall(function()
@@ -1842,6 +2242,7 @@ local function UpdateCharacterHitbox(char, shouldExpand, activeColor)
     end
 end
 
+-- Universal Skeleton Segment Builder (R15 + R6 + Custom Motor6D Rigs + Skinned Mesh Bones)
 local R15Skeleton = {
     {"Head", "UpperTorso"},
     {"UpperTorso", "LowerTorso"},
@@ -1903,15 +2304,72 @@ local function GetR6SkeletonPoints(char)
     return joints
 end
 
+local function GetUniversalSkeletonSegments(char)
+    local segments = {}
+
+    -- 1. Standard R15
+    if char:FindFirstChild("UpperTorso") then
+        for i = 1, #R15Skeleton do
+            local pair = R15Skeleton[i]
+            local p1, p2 = char:FindFirstChild(pair[1]), char:FindFirstChild(pair[2])
+            if p1 and p2 and p1:IsA("BasePart") and p2:IsA("BasePart") then
+                table.insert(segments, {p1.Position, p2.Position})
+            end
+        end
+        if #segments > 0 then return segments end
+    end
+
+    -- 2. Standard R6
+    if char:FindFirstChild("Torso") and char:FindFirstChild("Head") then
+        local r6 = GetR6SkeletonPoints(char)
+        if #r6 > 0 then return r6 end
+    end
+
+    if not QuantumConfig.CustomRigSupport then return segments end
+
+    -- 3. Skinned Mesh Bone Hierarchy (Custom Skins & Deformed Rigs)
+    local rigData = InspectAndCacheCustomRig(char)
+    if rigData and #rigData.Bones > 0 then
+        for _, bone in ipairs(rigData.Bones) do
+            if #segments >= MAX_SKELETON_LINES then break end
+            if bone.Parent and bone.Parent:IsA("Bone") then
+                local ok, p1, p2 = pcall(function()
+                    return bone.Parent.TransformedWorldCFrame.Position, bone.TransformedWorldCFrame.Position
+                end)
+                if ok and p1 and p2 and (p1 - p2).Magnitude > 0.15 then
+                    table.insert(segments, {p1, p2})
+                end
+            end
+        end
+        if #segments > 0 then return segments end
+    end
+
+    -- 4. Custom Motor6D / Weld Rig Graph
+    if rigData and #rigData.MotorJoints > 0 then
+        for _, joint in ipairs(rigData.MotorJoints) do
+            if #segments >= MAX_SKELETON_LINES then break end
+            local p0, p1 = joint[1], joint[2]
+            if p0 and p1 and p0.Parent and p1.Parent and (p0.Position - p1.Position).Magnitude > 0.15 then
+                table.insert(segments, {p0.Position, p1.Position})
+            end
+        end
+    end
+
+    return segments
+end
+
 local function CreateESPData(model)
     if ESP_Objects[model] then return ESP_Objects[model] end
     local esp = { 
         Name = Drawing.new("Text"), 
         Tracer = Drawing.new("Line"),
         Box = Drawing.new("Square"),
+        BoxFill = Drawing.new("Square"),
         HeadDot = Drawing.new("Circle"),
         HealthBG = Drawing.new("Line"),
         HealthBar = Drawing.new("Line"),
+        OffScreenArrow = Drawing.new("Triangle"),
+        Corners = {},
         Bones = {}
     }
     esp.Name.Size = 14 
@@ -1933,6 +2391,12 @@ local function CreateESPData(model)
     esp.Box.Transparency = 1
     esp.Box.Visible = false
 
+    esp.BoxFill.Thickness = 1
+    esp.BoxFill.Filled = true
+    esp.BoxFill.Color = QuantumConfig.ESP_Color
+    esp.BoxFill.Transparency = 0.18
+    esp.BoxFill.Visible = false
+
     esp.HeadDot.Thickness = 1.5
     esp.HeadDot.NumSides = 20
     esp.HeadDot.Filled = false
@@ -1948,8 +2412,22 @@ local function CreateESPData(model)
     esp.HealthBar.Thickness = 2
     esp.HealthBar.Transparency = 1
     esp.HealthBar.Visible = false
+
+    esp.OffScreenArrow.Filled = true
+    esp.OffScreenArrow.Thickness = 1
+    esp.OffScreenArrow.Transparency = 0.85
+    esp.OffScreenArrow.Visible = false
+
+    for i = 1, 8 do
+        local cLine = Drawing.new("Line")
+        cLine.Thickness = 2
+        cLine.Color = QuantumConfig.ESP_Color
+        cLine.Transparency = 1
+        cLine.Visible = false
+        table.insert(esp.Corners, cLine)
+    end
     
-    for i = 1, #R15Skeleton do
+    for i = 1, MAX_SKELETON_LINES do
         local line = Drawing.new("Line") 
         line.Thickness = 1.8
         line.Color = QuantumConfig.ESP_Color
@@ -1964,14 +2442,15 @@ end
 local function HideESP(esp)
     if not esp then return end
     esp.Box.Visible = false
+    esp.BoxFill.Visible = false
     esp.Name.Visible = false
     esp.Tracer.Visible = false
     esp.HeadDot.Visible = false
     esp.HealthBG.Visible = false
     esp.HealthBar.Visible = false
-    for i = 1, #esp.Bones do
-        esp.Bones[i].Visible = false
-    end
+    esp.OffScreenArrow.Visible = false
+    for i = 1, #esp.Corners do esp.Corners[i].Visible = false end
+    for i = 1, #esp.Bones do esp.Bones[i].Visible = false end
 end
 
 local function RemoveESPData(model)
@@ -1981,31 +2460,59 @@ local function RemoveESPData(model)
             esp.Name:Remove() 
             esp.Tracer:Remove()
             esp.Box:Remove()
+            esp.BoxFill:Remove()
             esp.HeadDot:Remove()
             esp.HealthBG:Remove()
             esp.HealthBar:Remove()
+            esp.OffScreenArrow:Remove()
+            for _, c in ipairs(esp.Corners) do c:Remove() end
             for _, l in ipairs(esp.Bones) do l:Remove() end
         end)
         ESP_Objects[model] = nil
     end
 end
 
+local function ResolveCustomPlayerCharacter(player)
+    if player.Character and IsAliveAndValid(player.Character) then
+        return player.Character
+    end
+    if not QuantumConfig.CustomRigSupport then return nil end
+
+    -- Check common custom character folders used in custom-rig games
+    local customFolders = {"Characters", "Players", "Entities", "Live", "Units", "SpawnedPlayers"}
+    for _, folderName in ipairs(customFolders) do
+        local folder = workspace:FindFirstChild(folderName)
+        if folder then
+            local found = folder:FindFirstChild(player.Name) or folder:FindFirstChild(tostring(player.UserId))
+            if found and found:IsA("Model") and IsAliveAndValid(found) then
+                return found
+            end
+        end
+    end
+    return nil
+end
+
 local function RefreshActiveEntities()
     local seenModels = {}
     local playerCount = 0
     local botCount = 0
+    local newTargetNames = {"None"}
 
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character and IsAliveAndValid(player.Character) then
-            local char = player.Character
-            seenModels[char] = true
-            playerCount = playerCount + 1
-            ActiveEntities[char] = {
-                Model = char,
-                Player = player,
-                IsBot = false,
-                Name = player.DisplayName or player.Name
-            }
+        if player ~= LocalPlayer then
+            local char = ResolveCustomPlayerCharacter(player)
+            if char then
+                seenModels[char] = true
+                playerCount = playerCount + 1
+                local dName = player.DisplayName or player.Name
+                ActiveEntities[char] = {
+                    Model = char,
+                    Player = player,
+                    IsBot = false,
+                    Name = dName
+                }
+                table.insert(newTargetNames, dName)
+            end
         end
     end
 
@@ -2026,6 +2533,7 @@ local function RefreshActiveEntities()
                         IsBot = true,
                         Name = displayName
                     }
+                    table.insert(newTargetNames, displayName)
                 end
             end
         end
@@ -2041,13 +2549,19 @@ local function RefreshActiveEntities()
         end
     end
 
-    EntitiesLabel.Text = string.format("Players: %d | Bots: %d", playerCount, botCount)
+    table.clear(TargetSelectOptions)
+    for _, n in ipairs(newTargetNames) do
+        table.insert(TargetSelectOptions, n)
+    end
+    if RefreshTargetCycle then pcall(RefreshTargetCycle) end
+
+    EntitiesLabel.Text = string.format("Players: %d | Bots/Rigs: %d", playerCount, botCount)
 end
 
 task.spawn(function()
     while not IsUnloaded do
         pcall(RefreshActiveEntities)
-        task.wait(0.25)
+        task.wait(0.3)
     end
 end)
 
@@ -2056,8 +2570,8 @@ local function GetTargetPart(char)
     local mode = QuantumConfig.SilentAimPart
     if mode == "Random" then
         local validParts = {}
-        for _, p in ipairs(char:GetChildren()) do
-            if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" and p.Name ~= "Handle" then
                 table.insert(validParts, p)
             end
         end
@@ -2069,8 +2583,8 @@ local function GetTargetPart(char)
         local closestPart = nil
         local shortestDist = math.huge
         local mousePos = UserInputService:GetMouseLocation()
-        for _, p in ipairs(char:GetChildren()) do
-            if p:IsA("BasePart") then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") and p.Name ~= "Handle" then
                 local pt, onScreen = Camera:WorldToViewportPoint(p.Position)
                 if onScreen then
                     local dist = (Vector2.new(pt.X, pt.Y) - mousePos).Magnitude
@@ -2082,16 +2596,22 @@ local function GetTargetPart(char)
             end
         end
         return closestPart or GetCharacterHead(char) or GetCharacterRoot(char)
+    elseif mode == "Head" then
+        return GetCharacterHead(char) or GetCharacterRoot(char)
     else
-        return char:FindFirstChild(mode) or GetCharacterHead(char) or GetCharacterRoot(char)
+        return char:FindFirstChild(mode, true) or GetCharacterRoot(char) or GetCharacterHead(char)
     end
 end
 
-local function GetPredictedPosition(targetPart)
-    if not targetPart then return Vector3.new(0, 0, 0) end
-    if not QuantumConfig.Prediction then return targetPart.Position end
-    local vel = targetPart.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
-    return targetPart.Position + (vel * QuantumConfig.PredictionAmount)
+local function GetPredictedPosition(targetPart, char)
+    if not targetPart then return Vector3.zero end
+    local basePos = targetPart.Position
+    if char and targetPart == GetCharacterHead(char) then
+        basePos = GetHeadWorldPosition(char)
+    end
+    if not QuantumConfig.Prediction then return basePos end
+    local vel = targetPart.AssemblyLinearVelocity or Vector3.zero
+    return basePos + (vel * QuantumConfig.PredictionAmount)
 end
 
 local function FindEntityFromDescendant(inst)
@@ -2145,27 +2665,19 @@ local function GetTriggerBotTarget(mousePos)
         end
     end
 
-    local camResult = workspace:Raycast(Camera.CFrame.Position, Camera.CFrame.LookVector * 2500, rayParams)
-    if camResult and camResult.Instance then
-        local ent = FindEntityFromDescendant(camResult.Instance)
-        if ent and IsAliveAndValid(ent.Model) and CheckTeam(ent) and (not ent.IsBot or QuantumConfig.IncludeBots) then
-            return ent
-        end
-    end
-
     for model, ent in pairs(ActiveEntities) do
         if IsAliveAndValid(model) and CheckTeam(ent) and (not ent.IsBot or QuantumConfig.IncludeBots) then
-            local head = GetCharacterHead(model)
             local hrp = GetCharacterRoot(model)
-            if head and hrp then
-                local hPos, hVis = Camera:WorldToViewportPoint(head.Position)
-                local rPos, rVis = Camera:WorldToViewportPoint(hrp.Position)
+            if hrp then
+                local topW, botW, headW = GetCharacterBounds(model, hrp)
+                local hPos, hVis = Camera:WorldToViewportPoint(topW)
+                local rPos, rVis = Camera:WorldToViewportPoint(botW)
                 if hVis and rVis then
-                    local height = math.abs(rPos.Y - hPos.Y) * 2.1
-                    local width = math.max(height * 0.55, 18)
-                    local centerX, centerY = rPos.X, (hPos.Y + rPos.Y) / 2
+                    local height = math.abs(rPos.Y - hPos.Y)
+                    local width = math.max(height * 0.58, 18)
+                    local centerX, centerY = (hPos.X + rPos.X) / 2, (hPos.Y + rPos.Y) / 2
                     if math.abs(mousePos.X - centerX) <= width / 2 and math.abs(mousePos.Y - centerY) <= height / 2 then
-                        if not QuantumConfig.WallCheck or IsVisible(head, model) or IsVisible(hrp, model) then
+                        if not QuantumConfig.WallCheck or IsVisible(headW, model) or IsVisible(hrp, model) then
                             return ent
                         end
                     end
@@ -2248,12 +2760,48 @@ TrackConnection(RunService.Stepped:Connect(function()
 end))
 
 -----------------------------------
--- 9. MAIN RENDERSTEPPED LOOP
+-- 10. MAIN RENDERSTEPPED LOOP
 -----------------------------------
 local lastUpdate = tick()
 local lastFrameTime = tick()
 local lastTrigger = 0
 local frames = 0
+local crosshairAngle = 0
+
+local function UpdateCornerBox(corners, pos, size, color, visible)
+    if not visible then
+        for i = 1, 8 do corners[i].Visible = false end
+        return
+    end
+    local x, y, w, h = pos.X, pos.Y, size.X, size.Y
+    local cLen = math.clamp(math.min(w, h) * 0.28, 3, 18)
+
+    -- Top-Left
+    corners[1].From = Vector2.new(x, y)
+    corners[1].To = Vector2.new(x + cLen, y)
+    corners[2].From = Vector2.new(x, y)
+    corners[2].To = Vector2.new(x, y + cLen)
+    -- Top-Right
+    corners[3].From = Vector2.new(x + w, y)
+    corners[3].To = Vector2.new(x + w - cLen, y)
+    corners[4].From = Vector2.new(x + w, y)
+    corners[4].To = Vector2.new(x + w, y + cLen)
+    -- Bottom-Left
+    corners[5].From = Vector2.new(x, y + h)
+    corners[5].To = Vector2.new(x + cLen, y + h)
+    corners[6].From = Vector2.new(x, y + h)
+    corners[6].To = Vector2.new(x, y + h - cLen)
+    -- Bottom-Right
+    corners[7].From = Vector2.new(x + w, y + h)
+    corners[7].To = Vector2.new(x + w - cLen, y + h)
+    corners[8].From = Vector2.new(x + w, y + h)
+    corners[8].To = Vector2.new(x + w, y + h - cLen)
+
+    for i = 1, 8 do
+        corners[i].Color = color
+        corners[i].Visible = true
+    end
+end
 
 TrackConnection(RunService.RenderStepped:Connect(function()
     if IsUnloaded then return end
@@ -2272,6 +2820,10 @@ TrackConnection(RunService.RenderStepped:Connect(function()
             lastUpdate = currentTime
         end
         
+        local activeESPColor = QuantumConfig.RainbowESP
+            and Color3.fromHSV((currentTime * 0.22) % 1, 0.9, 1)
+            or (QuantumConfig.ESP_Color or Color3.fromRGB(255, 45, 85))
+
         if QuantumConfig.ShowFOV then
             FOVCircle.Visible = true 
             FOVCircle.Radius = QuantumConfig.FOVRadius 
@@ -2283,8 +2835,49 @@ TrackConnection(RunService.RenderStepped:Connect(function()
             FOVCircle.Visible = false
         end
 
+        -- Custom Drawing Crosshair
+        if QuantumConfig.CustomCrosshair then
+            if QuantumConfig.CrosshairSpin then
+                crosshairAngle = (crosshairAngle + dt * 2.6) % (math.pi * 2)
+            else
+                crosshairAngle = 0
+            end
+            local gap = QuantumConfig.CrosshairGap
+            local len = QuantumConfig.CrosshairSize
+            for i = 1, 4 do
+                local ang = crosshairAngle + (i - 1) * (math.pi / 2)
+                local dir = Vector2.new(math.cos(ang), math.sin(ang))
+                CrosshairLines[i].From = mousePos + dir * gap
+                CrosshairLines[i].To = mousePos + dir * (gap + len)
+                CrosshairLines[i].Color = activeESPColor
+                CrosshairLines[i].Visible = true
+            end
+            CrosshairCenterDot.Position = mousePos
+            CrosshairCenterDot.Color = activeESPColor
+            CrosshairCenterDot.Visible = true
+        else
+            for i = 1, 4 do CrosshairLines[i].Visible = false end
+            CrosshairCenterDot.Visible = false
+        end
+
         if QuantumConfig.CustomCameraFOV then
             Camera.FieldOfView = QuantumConfig.CameraFOV
+        end
+
+        -- Spectate Handler
+        if QuantumConfig.SpectateTarget and QuantumConfig.SelectedTargetName ~= "None" then
+            for model, ent in pairs(ActiveEntities) do
+                if ent.Name == QuantumConfig.SelectedTargetName or model.Name == QuantumConfig.SelectedTargetName then
+                    local tHum = GetCharacterHumanoid(model)
+                    local tHead = GetCharacterHead(model)
+                    if tHum then
+                        Camera.CameraSubject = tHum
+                    elseif tHead then
+                        Camera.CameraSubject = tHead
+                    end
+                    break
+                end
+            end
         end
 
         local lChar = LocalPlayer.Character
@@ -2323,13 +2916,10 @@ TrackConnection(RunService.RenderStepped:Connect(function()
             end
         end
 
-        local activeESPColor = QuantumConfig.RainbowESP
-            and Color3.fromHSV((currentTime * 0.22) % 1, 0.9, 1)
-            or (QuantumConfig.ESP_Color or Color3.fromRGB(255, 45, 85))
-
+        local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
         local tracerStartPos = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
         if QuantumConfig.TracerOrigin == "Center" then
-            tracerStartPos = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+            tracerStartPos = screenCenter
         elseif QuantumConfig.TracerOrigin == "Mouse" then
             tracerStartPos = mousePos
         end
@@ -2354,6 +2944,7 @@ TrackConnection(RunService.RenderStepped:Connect(function()
                         if not hl then 
                             hl = Instance.new("Highlight") 
                             hl.Name = "QuantumChams" 
+                            hl.Adornee = model
                             hl.Parent = model 
                         end
                         hl.FillColor = activeESPColor
@@ -2367,13 +2958,13 @@ TrackConnection(RunService.RenderStepped:Connect(function()
                         if hl then hl.Enabled = false end
                     end
 
-                    local aimPart = model:FindFirstChild(QuantumConfig.TargetPart) or head or hrp
-                    local aimScreenPos, aimOnScreen = Camera:WorldToViewportPoint(aimPart.Position)
+                    local aimWorldPos = (QuantumConfig.TargetPart == "Head") and GetHeadWorldPosition(model) or hrp.Position
+                    local aimScreenPos, aimOnScreen = Camera:WorldToViewportPoint(aimWorldPos)
                     if aimOnScreen then
                         local cursorDist = (Vector2.new(aimScreenPos.X, aimScreenPos.Y) - mousePos).Magnitude
                         if cursorDist <= QuantumConfig.FOVRadius then
                             local needVisCheck = QuantumConfig.WallCheck or QuantumConfig.PrioritizeBehindWalls
-                            local visible = (not needVisCheck) or IsVisible(aimPart, model)
+                            local visible = (not needVisCheck) or IsVisible(aimWorldPos, model)
 
                             if QuantumConfig.PrioritizeBehindWalls then
                                 if not visible and cursorDist < shortestBehindWallDist then
@@ -2396,14 +2987,26 @@ TrackConnection(RunService.RenderStepped:Connect(function()
                     local distance = (Camera.CFrame.Position - hrp.Position).Magnitude
 
                     if onScreen and distance <= QuantumConfig.MaxDistance then
-                        local headScreen, headVis = Camera:WorldToViewportPoint(head.Position)
-                        local topScreen = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.75, 0))
-                        local botScreen = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3.0, 0))
+                        esp.OffScreenArrow.Visible = false
+
+                        local topWorld, botWorld, headWorld = GetCharacterBounds(model, hrp)
+                        local headScreen, headVis = Camera:WorldToViewportPoint(headWorld)
+                        local topScreen = Camera:WorldToViewportPoint(topWorld)
+                        local botScreen = Camera:WorldToViewportPoint(botWorld)
                         
                         local boxHeight = math.max(math.abs(botScreen.Y - topScreen.Y), 6)
                         local boxWidth = boxHeight * 0.6
                         local boxPos = Vector2.new(vector.X - boxWidth / 2, topScreen.Y)
                         local boxSize = Vector2.new(boxWidth, boxHeight)
+
+                        if QuantumConfig.FilledBoxESP then
+                            esp.BoxFill.Size = boxSize
+                            esp.BoxFill.Position = boxPos
+                            esp.BoxFill.Color = activeESPColor
+                            esp.BoxFill.Visible = true
+                        else
+                            esp.BoxFill.Visible = false
+                        end
 
                         if QuantumConfig.BoxESP then
                             esp.Box.Size = boxSize
@@ -2413,6 +3016,8 @@ TrackConnection(RunService.RenderStepped:Connect(function()
                         else
                             esp.Box.Visible = false
                         end
+
+                        UpdateCornerBox(esp.Corners, boxPos, boxSize, activeESPColor, QuantumConfig.CornerBoxESP)
 
                         if QuantumConfig.HeadDotESP and headVis then
                             esp.HeadDot.Position = Vector2.new(headScreen.X, headScreen.Y)
@@ -2445,7 +3050,7 @@ TrackConnection(RunService.RenderStepped:Connect(function()
                         end
                         
                         if QuantumConfig.NameESP then
-                            local prefix = entityData.IsBot and "[AI/BOT] " or ""
+                            local prefix = entityData.IsBot and "[RIG/BOT] " or ""
                             esp.Name.Position = Vector2.new(vector.X, topScreen.Y - 17)
                             esp.Name.Text = string.format("%s%s [%dm]", prefix, entityData.Name, math.floor(distance))
                             esp.Name.Color = activeESPColor
@@ -2464,52 +3069,45 @@ TrackConnection(RunService.RenderStepped:Connect(function()
                         end
                         
                         if QuantumConfig.SkeletonESP then
-                            if model:FindFirstChild("UpperTorso") then
-                                for i = 1, #R15Skeleton do
-                                    local conn = R15Skeleton[i]
-                                    local part1, part2 = model:FindFirstChild(conn[1]), model:FindFirstChild(conn[2])
-                                    if part1 and part2 then
-                                        local pos1, vis1 = Camera:WorldToViewportPoint(part1.Position)
-                                        local pos2, vis2 = Camera:WorldToViewportPoint(part2.Position)
-                                        if vis1 and vis2 then
-                                            esp.Bones[i].From = Vector2.new(pos1.X, pos1.Y)
-                                            esp.Bones[i].To = Vector2.new(pos2.X, pos2.Y)
-                                            esp.Bones[i].Color = activeESPColor
-                                            esp.Bones[i].Visible = true
-                                        else
-                                            esp.Bones[i].Visible = false
-                                        end
+                            local segments = GetUniversalSkeletonSegments(model)
+                            for i = 1, MAX_SKELETON_LINES do
+                                local seg = segments[i]
+                                if seg then
+                                    local pos1, vis1 = Camera:WorldToViewportPoint(seg[1])
+                                    local pos2, vis2 = Camera:WorldToViewportPoint(seg[2])
+                                    if vis1 and vis2 then
+                                        esp.Bones[i].From = Vector2.new(pos1.X, pos1.Y)
+                                        esp.Bones[i].To = Vector2.new(pos2.X, pos2.Y)
+                                        esp.Bones[i].Color = activeESPColor
+                                        esp.Bones[i].Visible = true
                                     else
                                         esp.Bones[i].Visible = false
                                     end
-                                end
-                            else
-                                local r6Joints = GetR6SkeletonPoints(model)
-                                for i = 1, #R15Skeleton do
-                                    local joint = r6Joints[i]
-                                    if joint then
-                                        local pos1, vis1 = Camera:WorldToViewportPoint(joint[1])
-                                        local pos2, vis2 = Camera:WorldToViewportPoint(joint[2])
-                                        if vis1 and vis2 then
-                                            esp.Bones[i].From = Vector2.new(pos1.X, pos1.Y)
-                                            esp.Bones[i].To = Vector2.new(pos2.X, pos2.Y)
-                                            esp.Bones[i].Color = activeESPColor
-                                            esp.Bones[i].Visible = true
-                                        else
-                                            esp.Bones[i].Visible = false
-                                        end
-                                    else
-                                        esp.Bones[i].Visible = false
-                                    end
+                                else
+                                    esp.Bones[i].Visible = false
                                 end
                             end
                         else
-                            for i = 1, #esp.Bones do
+                            for i = 1, MAX_SKELETON_LINES do
                                 esp.Bones[i].Visible = false
                             end
                         end
                     else
                         HideESP(esp)
+                        if QuantumConfig.OffScreenArrows and distance <= QuantumConfig.MaxDistance then
+                            local relPos = Camera.CFrame:PointToObjectSpace(hrp.Position)
+                            local angle = math.atan2(-relPos.Y, relPos.X)
+                            local dir = Vector2.new(math.cos(angle), math.sin(angle))
+                            local tipPos = screenCenter + dir * QuantumConfig.ArrowRadius
+                            local baseCenter = tipPos - dir * 14
+                            local perp = Vector2.new(-dir.Y, dir.X) * 7
+
+                            esp.OffScreenArrow.PointA = tipPos
+                            esp.OffScreenArrow.PointB = baseCenter + perp
+                            esp.OffScreenArrow.PointC = baseCenter - perp
+                            esp.OffScreenArrow.Color = activeESPColor
+                            esp.OffScreenArrow.Visible = true
+                        end
                     end
                 else
                     HideESP(esp)
@@ -2528,13 +3126,41 @@ TrackConnection(RunService.RenderStepped:Connect(function()
             CachedBestTarget = closestTarget
         end
 
+        -- Locked Target HUD & Snapline
         if CachedBestTarget and IsAliveAndValid(CachedBestTarget) then
             local ent = ActiveEntities[CachedBestTarget]
             local tag = (ent and ent.IsBot) and "[BOT] " or ""
-            TargetStatusLabel.Text = "Locked: " .. tag .. (ent and ent.Name or CachedBestTarget.Name)
+            local targetDisplayName = ent and ent.Name or CachedBestTarget.Name
+            TargetStatusLabel.Text = "Locked: " .. tag .. targetDisplayName
+
             local tPart = GetTargetPart(CachedBestTarget)
+            local tRoot = GetCharacterRoot(CachedBestTarget)
+
+            if QuantumConfig.ShowTargetHUD and tRoot then
+                TargetHUDFrame.Visible = true
+                TargetHUDName.Text = tag .. targetDisplayName
+                local curHp, maxHp = GetEntityHealthAndMax(CachedBestTarget)
+                local dist = math.floor((Camera.CFrame.Position - tRoot.Position).Magnitude)
+                TargetHUDInfo.Text = string.format("HP: %d/%d | %dm", math.floor(curHp), math.floor(maxHp), dist)
+                local ratio = math.clamp(curHp / math.max(maxHp, 1), 0, 1)
+                TargetHUDHPFill.Size = UDim2.new(ratio, 0, 1, 0)
+                TargetHUDHPFill.BackgroundColor3 = Color3.fromHSV(ratio * 0.33, 0.9, 1)
+
+                if ent and ent.Player then
+                    local uid = ent.Player.UserId
+                    if not ThumbnailCache[uid] then
+                        ThumbnailCache[uid] = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(uid) .. "&w=150&h=150"
+                    end
+                    TargetAvatar.Image = ThumbnailCache[uid]
+                else
+                    TargetAvatar.Image = "rbxassetid://6031094678"
+                end
+            else
+                TargetHUDFrame.Visible = false
+            end
+
             if QuantumConfig.ShowTargetLine and (QuantumConfig.Aimbot or QuantumConfig.SilentAim) and tPart then
-                local tScreen, tVis = Camera:WorldToViewportPoint(GetPredictedPosition(tPart))
+                local tScreen, tVis = Camera:WorldToViewportPoint(GetPredictedPosition(tPart, CachedBestTarget))
                 if tVis then
                     local tVec = Vector2.new(tScreen.X, tScreen.Y)
                     TargetSnapLine.From = mousePos
@@ -2555,6 +3181,7 @@ TrackConnection(RunService.RenderStepped:Connect(function()
             end
         else
             TargetStatusLabel.Text = "Locked: None"
+            TargetHUDFrame.Visible = false
             TargetSnapLine.Visible = false
             TargetLockRing.Visible = false
         end
@@ -2562,9 +3189,11 @@ TrackConnection(RunService.RenderStepped:Connect(function()
         if QuantumConfig.Aimbot and IsAimbotKeyDown() then
             local targetChar = CachedBestTarget
             if targetChar and IsAliveAndValid(targetChar) then
-                local targetPart = targetChar:FindFirstChild(QuantumConfig.TargetPart) or GetCharacterHead(targetChar)
+                local targetPart = (QuantumConfig.TargetPart == "Head" and GetCharacterHead(targetChar))
+                    or targetChar:FindFirstChild(QuantumConfig.TargetPart, true)
+                    or GetCharacterRoot(targetChar)
                 if targetPart then
-                    local aimPos = GetPredictedPosition(targetPart)
+                    local aimPos = GetPredictedPosition(targetPart, targetChar)
                     local cameraCFrame = Camera.CFrame
                     local newLookVector = (aimPos - cameraCFrame.Position).Unit
                     local targetCFrame = CFrame.new(cameraCFrame.Position, cameraCFrame.Position + newLookVector)
@@ -2584,7 +3213,7 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 end))
 
 -----------------------------------
--- 10. UNIVERSAL SILENT AIM HOOKS
+-- 11. UNIVERSAL SILENT AIM HOOKS (RESTORABLE)
 -----------------------------------
 local function DeepReplace(tbl, targetPos, targetCF, targetInst, depth)
     depth = (depth or 0) + 1
@@ -2602,9 +3231,11 @@ local function DeepReplace(tbl, targetPos, targetCF, targetInst, depth)
     end
 end
 
+local OriginalNamecall = nil
+local OriginalIndex = nil
+
 if hookmetamethod and getnamecallmethod and checkcaller then
-    local oldNamecall
-    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    OriginalNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
         local args = {...}
         
@@ -2614,20 +3245,20 @@ if hookmetamethod and getnamecallmethod and checkcaller then
                 if targetChar and IsAliveAndValid(targetChar) then
                     local targetPart = GetTargetPart(targetChar)
                     if targetPart then
-                        local hitPos = GetPredictedPosition(targetPart)
+                        local hitPos = GetPredictedPosition(targetPart, targetChar)
                         local hitCF = CFrame.new(hitPos)
                         
                         if method == "Raycast" or method == "Spherecast" or method == "Blockcast" then
                             if typeof(args[1]) == "Vector3" and typeof(args[2]) == "Vector3" then
                                 local origMag = math.max(args[2].Magnitude, 1000)
                                 args[2] = (hitPos - args[1]).Unit * origMag
-                                return oldNamecall(self, unpack(args))
+                                return OriginalNamecall(self, unpack(args))
                             end
                         elseif method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
                             if typeof(args[1]) == "Ray" then
                                 local origMag = math.max(args[1].Direction.Magnitude, 1000)
                                 args[1] = Ray.new(args[1].Origin, (hitPos - args[1].Origin).Unit * origMag)
-                                return oldNamecall(self, unpack(args))
+                                return OriginalNamecall(self, unpack(args))
                             end
                         elseif method == "ScreenPointToRay" or method == "ViewportPointToRay" then
                             local origin = Camera.CFrame.Position
@@ -2645,17 +3276,16 @@ if hookmetamethod and getnamecallmethod and checkcaller then
                                     DeepReplace(v, hitPos, hitCF, targetPart, 0)
                                 end
                             end
-                            return oldNamecall(self, unpack(args))
+                            return OriginalNamecall(self, unpack(args))
                         end
                     end
                 end
             end
         end
-        return oldNamecall(self, ...)
+        return OriginalNamecall(self, ...)
     end)
 
-    local oldIndex
-    oldIndex = hookmetamethod(game, "__index", function(self, key)
+    OriginalIndex = hookmetamethod(game, "__index", function(self, key)
         if not IsUnloaded and QuantumConfig.SilentAim and not checkcaller() then
             if self == Mouse and (key == "Target" or key == "Hit" or key == "UnitRay") then
                 if math.random(1, 100) <= QuantumConfig.HitChance then
@@ -2663,7 +3293,7 @@ if hookmetamethod and getnamecallmethod and checkcaller then
                     if targetChar and IsAliveAndValid(targetChar) then
                         local targetPart = GetTargetPart(targetChar)
                         if targetPart then
-                            local hitPos = GetPredictedPosition(targetPart)
+                            local hitPos = GetPredictedPosition(targetPart, targetChar)
                             if key == "Target" then
                                 return targetPart
                             elseif key == "Hit" then
@@ -2678,16 +3308,21 @@ if hookmetamethod and getnamecallmethod and checkcaller then
                 end
             end
         end
-        return oldIndex(self, key)
+        return OriginalIndex(self, key)
     end)
 end
 
 -----------------------------------
--- 11. UNLOAD & CLEANUP REGISTRATION
+-- 12. UNLOAD & CLEANUP REGISTRATION
 -----------------------------------
 local function FullCleanup()
     if IsUnloaded then return end
     IsUnloaded = true
+
+    if hookmetamethod then
+        if OriginalNamecall then pcall(function() hookmetamethod(game, "__namecall", OriginalNamecall) end) end
+        if OriginalIndex then pcall(function() hookmetamethod(game, "__index", OriginalIndex) end) end
+    end
 
     for _, conn in ipairs(Connections) do
         pcall(function() conn:Disconnect() end)
@@ -2697,6 +3332,10 @@ local function FullCleanup()
     pcall(function() FOVCircle:Remove() end)
     pcall(function() TargetSnapLine:Remove() end)
     pcall(function() TargetLockRing:Remove() end)
+    pcall(function() CrosshairCenterDot:Remove() end)
+    for _, line in ipairs(CrosshairLines) do
+        pcall(function() line:Remove() end)
+    end
 
     for model, _ in pairs(ESP_Objects) do
         RemoveESPData(model)
@@ -2718,8 +3357,12 @@ local function FullCleanup()
     table.clear(LocalPlayerNoclipCache)
 
     local lChar = LocalPlayer.Character
-    local lHrp = lChar and lChar:FindFirstChild("QuantumAuraEmitter", true)
-    if lHrp then pcall(function() lHrp:Destroy() end) end
+    if lChar then
+        local lHum = GetCharacterHumanoid(lChar)
+        if lHum then pcall(function() Camera.CameraSubject = lHum end) end
+        local lHrp = lChar:FindFirstChild("QuantumAuraEmitter", true)
+        if lHrp then pcall(function() lHrp:Destroy() end) end
+    end
 
     pcall(function()
         Lighting.ClockTime = OriginalLighting.ClockTime
@@ -2741,6 +3384,6 @@ GlobalEnv.QuantumHubCleanup = FullCleanup
 
 CreateActionButton(SettingsTab, "Unload Quantum Hub & Restore Defaults", "UNLOAD", FullCleanup)
 
-Notify("Quantum Hub v3.5 Loaded", "Universal Player & Deep-AI/Bot Engine Active! Press RightShift to toggle.", 4.0, false)
+Notify("Quantum Hub v4.0 Loaded", "Custom Skin & Universal Rig Engine Active! Press RightShift to toggle.", 4.0, false)
 UpdateTheme()
 UpdateWorld()
