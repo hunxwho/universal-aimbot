@@ -1,0 +1,2746 @@
+if not game:IsLoaded() then 
+    game.Loaded:Wait() 
+end
+
+-----------------------------------
+-- 0. IDEMPOTENT CLEANUP HANDLER
+-----------------------------------
+local GlobalEnv = (getgenv and getgenv()) or _G
+if GlobalEnv.QuantumHubCleanup then
+    pcall(GlobalEnv.QuantumHubCleanup)
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+local Stats = game:GetService("Stats")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local VirtualInputManager = game:FindService("VirtualInputManager") or (pcall(function() return game:GetService("VirtualInputManager") end) and game:GetService("VirtualInputManager")) or nil
+
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+local Camera = workspace.CurrentCamera
+
+local Connections = {}
+local function TrackConnection(conn)
+    table.insert(Connections, conn)
+    return conn
+end
+
+TrackConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    Camera = workspace.CurrentCamera
+end))
+
+local OriginalLighting = {
+    ClockTime = Lighting.ClockTime,
+    Brightness = Lighting.Brightness,
+    Ambient = Lighting.Ambient,
+    OutdoorAmbient = Lighting.OutdoorAmbient,
+    FogEnd = Lighting.FogEnd
+}
+
+-----------------------------------
+-- 1. CONFIGURATION & STATE
+-----------------------------------
+local QuantumConfig = {
+    -- Global & Universal AI/Bot Support
+    TeamCheck = false,
+    IncludeBots = true,
+    IgnoreForceField = false,
+    
+    -- Combat
+    Aimbot = false,
+    SilentAim = false,
+    SilentAimPart = "Head",
+    HitChance = 100,
+    Prediction = false,
+    PredictionAmount = 0.136,
+    PrioritizeBehindWalls = false,
+    TriggerBot = false,
+    TriggerWithSilentAim = false,
+    TriggerDelay = 0.05,
+    WallCheck = false,
+    ShowFOV = false,
+    FilledFOV = false,
+    FOVRadius = 150,
+    Smoothness = 45, -- Default safe (< 70%)
+    AimbotKey = Enum.UserInputType.MouseButton2,
+    AimbotKeyName = "MouseButton2",
+    TargetPart = "Head",
+    ShowTargetLine = true,
+    HitboxExpander = false,
+    HitboxPart = "HumanoidRootPart",
+    HitboxSize = 8,
+    HitboxTransparency = 0.7,
+    
+    -- Visuals
+    NameESP = false,
+    BoxESP = false,
+    HealthESP = false,
+    HeadDotESP = false,
+    Tracers = false,
+    TracerOrigin = "Bottom",
+    SkeletonESP = false,
+    ChamsESP = false,
+    RainbowESP = false,
+    MaxDistance = 2000,
+    ESP_Color = Color3.fromRGB(255, 45, 85),
+
+    -- Movement & LocalPlayer
+    CustomWalkSpeed = false,
+    WalkSpeed = 32,
+    CustomJumpPower = false,
+    JumpPower = 75,
+    InfiniteJump = false,
+    Fly = false,
+    FlySpeed = 65,
+    Noclip = false,
+    SpinBot = false,
+    SpinSpeed = 25,
+    CustomCameraFOV = false,
+    CameraFOV = 90,
+    
+    -- World Engine
+    WorldTheme = "Default",
+    MoonSize = 20,
+    Brightness = 2,
+    Fullbright = false,
+    NoFog = false,
+    QuantumAura = false,
+    
+    -- UI Settings
+    Theme = "Crimson",
+    MenuOpen = true
+}
+
+local Themes = {
+    Crimson = Color3.fromRGB(255, 45, 85),
+    Ocean = Color3.fromRGB(0, 180, 255),
+    Emerald = Color3.fromRGB(40, 255, 120),
+    Amethyst = Color3.fromRGB(180, 60, 255),
+    Amber = Color3.fromRGB(255, 160, 0),
+    Ghost = Color3.fromRGB(220, 220, 255),
+    Bubblegum = Color3.fromRGB(255, 80, 200),
+    Cyanide = Color3.fromRGB(0, 255, 255),
+    Toxic = Color3.fromRGB(160, 255, 60),
+    Lavender = Color3.fromRGB(200, 140, 255),
+    Sunset = Color3.fromRGB(255, 90, 70),
+    Gold = Color3.fromRGB(255, 215, 0),
+    Hacker = Color3.fromRGB(0, 255, 65),
+    Void = Color3.fromRGB(110, 20, 255),
+    Blood = Color3.fromRGB(180, 10, 10),
+    Frost = Color3.fromRGB(100, 240, 255),
+    Magma = Color3.fromRGB(255, 70, 10),
+    HotPink = Color3.fromRGB(255, 0, 150),
+    Voltage = Color3.fromRGB(210, 255, 0),
+    Onyx = Color3.fromRGB(180, 180, 180),
+    MidnightBlue = Color3.fromRGB(20, 60, 255),
+    Mint = Color3.fromRGB(0, 255, 150)
+}
+
+local ThemeOptionsList = {
+    "Crimson", "Ocean", "Emerald", "Amethyst", "Amber", "Ghost", 
+    "Bubblegum", "Cyanide", "Toxic", "Lavender", "Sunset", "Gold",
+    "Hacker", "Void", "Blood", "Frost", "Magma", "HotPink", "Voltage", "Onyx", "MidnightBlue", "Mint"
+}
+
+local WorldOptionsList = {
+    "Default", "Midnight", "Vaporwave", "Nuclear", "Blood Moon", "Quantum Space",
+    "Aurora Borealis", "Eternal Sunset", "Thunderstorm", "Cosmic Nebula", "Inferno Sky", "Paradise",
+    "Cyberpunk City", "Deep Space", "Synthwave Retro"
+}
+
+local ThemeColors = {
+    Background = Color3.fromRGB(13, 14, 20),
+    NavBG = Color3.fromRGB(19, 21, 30),
+    CardBG = Color3.fromRGB(22, 24, 35),
+    CardHover = Color3.fromRGB(29, 32, 46),
+    ControlBG = Color3.fromRGB(34, 37, 52),
+    TextWhite = Color3.fromRGB(245, 247, 255),
+    TextGray = Color3.fromRGB(140, 146, 175),
+    WarningOrange = Color3.fromRGB(255, 165, 30),
+    DangerRed = Color3.fromRGB(255, 55, 65)
+}
+
+local ESP_Objects = {}
+local ActiveEntities = {}       -- [Model] = {Model = model, Player = playerOrNil, IsBot = boolean, Name = string}
+local DiscoveredBotModels = {}  -- [Model] = true (Populated by deep workspace scanner + DescendantAdded)
+local OriginalPartProperties = {}
+local LocalPlayerNoclipCache = {}
+local ThemeElements = {}
+local UIControlRefreshers = {}
+local CachedBestTarget = nil
+local IsUnloaded = false
+local IsFiringTrigger = false
+local BindingKey = false
+
+-----------------------------------
+-- 2. SEAMLESS WORLD ENGINE
+-----------------------------------
+local CreatedLightingObjects = {}
+
+local function UpdateWorld()
+    if IsUnloaded then return end
+    local sky = Lighting:FindFirstChildOfClass("Sky")
+    if not sky then
+        sky = Instance.new("Sky")
+        sky.Parent = Lighting
+        table.insert(CreatedLightingObjects, sky)
+    end
+    
+    local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
+    if not atmosphere then
+        atmosphere = Instance.new("Atmosphere")
+        atmosphere.Parent = Lighting
+        table.insert(CreatedLightingObjects, atmosphere)
+    end
+    
+    local cc = Lighting:FindFirstChild("QuantumColorCorrection")
+    if not cc then
+        cc = Instance.new("ColorCorrectionEffect")
+        cc.Name = "QuantumColorCorrection"
+        cc.Parent = Lighting
+        table.insert(CreatedLightingObjects, cc)
+    end
+    
+    Lighting.ClockTime = 14
+    Lighting.Brightness = QuantumConfig.Fullbright and 3.5 or QuantumConfig.Brightness
+    Lighting.Ambient = QuantumConfig.Fullbright and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(128, 128, 128)
+    Lighting.OutdoorAmbient = QuantumConfig.Fullbright and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(128, 128, 128)
+    Lighting.FogEnd = QuantumConfig.NoFog and 9e9 or 100000
+    
+    sky.SunAngularSize = 14
+    sky.MoonAngularSize = QuantumConfig.MoonSize
+    sky.StarCount = 3000
+    
+    cc.TintColor = Color3.fromRGB(255, 255, 255)
+    cc.Saturation = 0
+    cc.Contrast = 0
+    
+    atmosphere.Density = QuantumConfig.NoFog and 0 or 0.3
+    atmosphere.Offset = 0.25
+    atmosphere.Glare = 0.5
+    atmosphere.Haze = QuantumConfig.NoFog and 0 or 0.2
+    atmosphere.Color = Color3.fromRGB(199, 199, 199)
+    atmosphere.Decay = Color3.fromRGB(100, 100, 100)
+    
+    local theme = QuantumConfig.WorldTheme
+    if theme == "Default" then
+        Lighting.ClockTime = OriginalLighting.ClockTime
+        atmosphere.Color = Color3.fromRGB(150, 180, 220)
+        atmosphere.Decay = Color3.fromRGB(80, 100, 150)
+    elseif theme == "Midnight" then
+        Lighting.ClockTime = 0
+        if not QuantumConfig.Fullbright then Lighting.Brightness = 0.5 end
+        sky.StarCount = 15000
+        atmosphere.Color = Color3.fromRGB(10, 10, 20)
+    elseif theme == "Vaporwave" then
+        Lighting.ClockTime = 18
+        Lighting.Ambient = Color3.fromRGB(200, 80, 255)
+        atmosphere.Color = Color3.fromRGB(255, 80, 200)
+        atmosphere.Haze = 0.5
+        cc.TintColor = Color3.fromRGB(230, 150, 255)
+        cc.Saturation = 0.5
+    elseif theme == "Nuclear" then
+        Lighting.ClockTime = 12
+        Lighting.Ambient = Color3.fromRGB(80, 255, 80)
+        atmosphere.Color = Color3.fromRGB(120, 255, 120)
+        atmosphere.Haze = 0.8
+        cc.TintColor = Color3.fromRGB(180, 255, 180)
+    elseif theme == "Blood Moon" then
+        Lighting.ClockTime = 0
+        Lighting.Ambient = Color3.fromRGB(255, 40, 40)
+        atmosphere.Color = Color3.fromRGB(200, 20, 20)
+        cc.TintColor = Color3.fromRGB(255, 150, 150)
+    elseif theme == "Quantum Space" then
+        Lighting.ClockTime = 0
+        Lighting.Brightness = 1.5
+        atmosphere.Density = 0
+        atmosphere.Haze = 0
+        sky.StarCount = 30000
+        cc.TintColor = Color3.fromRGB(180, 180, 255)
+        cc.Contrast = 0.2
+    elseif theme == "Aurora Borealis" then
+        Lighting.ClockTime = 1
+        atmosphere.Color = Color3.fromRGB(60, 255, 220)
+        sky.StarCount = 12000
+        cc.TintColor = Color3.fromRGB(180, 255, 255)
+    elseif theme == "Eternal Sunset" then
+        Lighting.ClockTime = 17.8
+        atmosphere.Color = Color3.fromRGB(255, 120, 60)
+        atmosphere.Haze = 0.3
+        cc.TintColor = Color3.fromRGB(255, 200, 180)
+    elseif theme == "Thunderstorm" then
+        Lighting.ClockTime = 12
+        if not QuantumConfig.Fullbright then Lighting.Brightness = 0.3 end
+        atmosphere.Density = 0.6
+        atmosphere.Haze = 2
+        atmosphere.Color = Color3.fromRGB(50, 55, 65)
+        cc.Saturation = -0.5
+    elseif theme == "Cosmic Nebula" then
+        Lighting.ClockTime = 0
+        atmosphere.Color = Color3.fromRGB(140, 40, 255)
+        sky.StarCount = 15000
+        cc.TintColor = Color3.fromRGB(220, 180, 255)
+    elseif theme == "Inferno Sky" then
+        Lighting.ClockTime = 15
+        Lighting.Ambient = Color3.fromRGB(255, 100, 40)
+        atmosphere.Color = Color3.fromRGB(255, 80, 20)
+        atmosphere.Haze = 0.5
+        cc.TintColor = Color3.fromRGB(255, 180, 150)
+    elseif theme == "Paradise" then
+        Lighting.ClockTime = 11
+        Lighting.Brightness = 3.6
+        atmosphere.Color = Color3.fromRGB(100, 200, 255)
+        cc.Saturation = 0.4
+    elseif theme == "Cyberpunk City" then
+        Lighting.ClockTime = 2
+        Lighting.Ambient = Color3.fromRGB(255, 0, 150)
+        atmosphere.Color = Color3.fromRGB(0, 255, 255)
+        atmosphere.Haze = 0.4
+        cc.TintColor = Color3.fromRGB(255, 200, 255)
+    elseif theme == "Deep Space" then
+        Lighting.ClockTime = 0
+        Lighting.Brightness = 2
+        atmosphere.Density = 0
+        atmosphere.Haze = 0
+        sky.StarCount = 25000
+        cc.Saturation = -0.2
+    elseif theme == "Synthwave Retro" then
+        Lighting.ClockTime = 18
+        Lighting.Brightness = 1.8
+        atmosphere.Color = Color3.fromRGB(255, 0, 100)
+        atmosphere.Haze = 0.3
+        cc.TintColor = Color3.fromRGB(255, 180, 220)
+    end
+end
+
+-- Persistent Quantum Aura Handler
+task.spawn(function()
+    while not IsUnloaded do
+        pcall(function()
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local emitter = hrp:FindFirstChild("QuantumAuraEmitter")
+                if QuantumConfig.QuantumAura then
+                    if not emitter then
+                        emitter = Instance.new("ParticleEmitter")
+                        emitter.Name = "QuantumAuraEmitter"
+                        emitter.Size = NumberSequence.new(0.5, 0)
+                        emitter.Texture = "rbxassetid://243098098"
+                        emitter.Lifetime = NumberRange.new(0.8)
+                        emitter.Rate = 28
+                        emitter.Speed = NumberRange.new(2.5)
+                        emitter.Parent = hrp
+                    end
+                    emitter.Color = ColorSequence.new(Themes[QuantumConfig.Theme])
+                    emitter.Enabled = true
+                elseif emitter then
+                    emitter.Enabled = false
+                end
+            end
+        end)
+        task.wait(0.25)
+    end
+end)
+
+-----------------------------------
+-- 3. UI HELPER & THEME ENGINE
+-----------------------------------
+local function AddCorner(obj, radius)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, radius)
+    corner.Parent = obj
+    return corner
+end
+
+local function AddStroke(obj, color, thickness)
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = color
+    stroke.Thickness = thickness or 1
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Parent = obj
+    return stroke
+end
+
+local function UpdateTheme()
+    local currentAccent = Themes[QuantumConfig.Theme]
+    for _, element in ipairs(ThemeElements) do
+        if element.inst and element.inst.Parent then
+            if element.condition == nil or element.condition() == true then
+                TweenService:Create(element.inst, TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                    [element.prop] = currentAccent
+                }):Play()
+            end
+        end
+    end
+end
+
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Visible = false
+FOVCircle.Thickness = 1.6
+FOVCircle.Filled = false
+FOVCircle.NumSides = 64
+FOVCircle.Transparency = 1
+
+local TargetSnapLine = Drawing.new("Line")
+TargetSnapLine.Visible = false
+TargetSnapLine.Thickness = 1.6
+TargetSnapLine.Transparency = 1
+
+local TargetLockRing = Drawing.new("Circle")
+TargetLockRing.Visible = false
+TargetLockRing.Thickness = 2
+TargetLockRing.Radius = 6
+TargetLockRing.Filled = false
+TargetLockRing.NumSides = 24
+TargetLockRing.Transparency = 1
+
+-----------------------------------
+-- 4. MODERN NOVA GUI ARCHITECTURE
+-----------------------------------
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "QuantumScriptsPremium"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local guiSuccess = pcall(function()
+    ScreenGui.Parent = (gethui and gethui()) or CoreGui
+end)
+if not guiSuccess then
+    ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+-- Toast Notification System (Supports Standard & High-Risk Anti-Cheat Alerts)
+local NotifContainer = Instance.new("Frame")
+NotifContainer.Size = UDim2.new(0, 280, 0, 240)
+NotifContainer.Position = UDim2.new(1, -296, 1, -256)
+NotifContainer.BackgroundTransparency = 1
+NotifContainer.Parent = ScreenGui
+
+local NotifLayout = Instance.new("UIListLayout")
+NotifLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+NotifLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+NotifLayout.Padding = UDim.new(0, 8)
+NotifLayout.Parent = NotifContainer
+
+local function Notify(titleText, bodyText, duration, isWarning)
+    task.spawn(function()
+        local accentColor = isWarning and ThemeColors.WarningOrange or Themes[QuantumConfig.Theme]
+
+        local Card = Instance.new("Frame")
+        Card.Size = UDim2.new(1, 0, 0, 54)
+        Card.BackgroundColor3 = isWarning and Color3.fromRGB(32, 22, 18) or ThemeColors.CardBG
+        Card.BackgroundTransparency = 1
+        AddCorner(Card, 10)
+        local Stroke = AddStroke(Card, accentColor, 1.4)
+        Stroke.Transparency = 1
+        Card.Parent = NotifContainer
+
+        local TLabel = Instance.new("TextLabel")
+        TLabel.Size = UDim2.new(1, -20, 0, 18)
+        TLabel.Position = UDim2.new(0, 12, 0, 6)
+        TLabel.BackgroundTransparency = 1
+        TLabel.Text = titleText
+        TLabel.TextColor3 = accentColor
+        TLabel.Font = Enum.Font.GothamBold
+        TLabel.TextSize = 12
+        TLabel.TextXAlignment = Enum.TextXAlignment.Left
+        TLabel.TextTransparency = 1
+        TLabel.Parent = Card
+
+        local BLabel = Instance.new("TextLabel")
+        BLabel.Size = UDim2.new(1, -20, 0, 22)
+        BLabel.Position = UDim2.new(0, 12, 0, 24)
+        BLabel.BackgroundTransparency = 1
+        BLabel.Text = bodyText
+        BLabel.TextColor3 = ThemeColors.TextWhite
+        BLabel.Font = Enum.Font.GothamMedium
+        BLabel.TextSize = 11
+        BLabel.TextWrapped = true
+        BLabel.TextXAlignment = Enum.TextXAlignment.Left
+        BLabel.TextTransparency = 1
+        BLabel.Parent = Card
+
+        TweenService:Create(Card, TweenInfo.new(0.22), {BackgroundTransparency = 0.04}):Play()
+        TweenService:Create(Stroke, TweenInfo.new(0.22), {Transparency = 0}):Play()
+        TweenService:Create(TLabel, TweenInfo.new(0.22), {TextTransparency = 0}):Play()
+        TweenService:Create(BLabel, TweenInfo.new(0.22), {TextTransparency = 0}):Play()
+
+        task.wait(duration or 3.0)
+        if Card and Card.Parent then
+            TweenService:Create(Card, TweenInfo.new(0.22), {BackgroundTransparency = 1}):Play()
+            TweenService:Create(Stroke, TweenInfo.new(0.22), {Transparency = 1}):Play()
+            TweenService:Create(TLabel, TweenInfo.new(0.22), {TextTransparency = 1}):Play()
+            TweenService:Create(BLabel, TweenInfo.new(0.22), {TextTransparency = 1}):Play()
+            task.wait(0.22)
+            pcall(function() Card:Destroy() end)
+        end
+    end)
+end
+
+-- Floating Quick-Toggle Pill
+local OpenToggleButton = Instance.new("TextButton")
+OpenToggleButton.Size = UDim2.new(0, 50, 0, 50)
+OpenToggleButton.Position = UDim2.new(0, 25, 0.5, -25)
+OpenToggleButton.BackgroundColor3 = ThemeColors.CardBG
+OpenToggleButton.Text = "QS"
+OpenToggleButton.TextColor3 = Themes[QuantumConfig.Theme]
+OpenToggleButton.Font = Enum.Font.GothamBold
+OpenToggleButton.TextSize = 17
+OpenToggleButton.AutoButtonColor = false
+AddCorner(OpenToggleButton, 25)
+local ToggleStroke = AddStroke(OpenToggleButton, Themes[QuantumConfig.Theme], 1.5)
+OpenToggleButton.Parent = ScreenGui
+table.insert(ThemeElements, {inst = OpenToggleButton, prop = "TextColor3"})
+table.insert(ThemeElements, {inst = ToggleStroke, prop = "Color"})
+
+-- Main Hub Container
+local MainFrame = Instance.new("CanvasGroup")
+MainFrame.Size = UDim2.new(0, 590, 0, 435)
+MainFrame.Position = UDim2.new(0.5, -295, 0.5, -217)
+MainFrame.BackgroundColor3 = ThemeColors.Background
+MainFrame.BorderSizePixel = 0
+MainFrame.GroupTransparency = 0
+AddCorner(MainFrame, 16)
+AddStroke(MainFrame, Color3.fromRGB(48, 53, 75), 1.5)
+MainFrame.Parent = ScreenGui
+
+-- Topbar
+local Topbar = Instance.new("Frame")
+Topbar.Size = UDim2.new(1, 0, 0, 54)
+Topbar.BackgroundTransparency = 1
+Topbar.Active = true
+Topbar.Parent = MainFrame
+
+local BrandDot = Instance.new("Frame")
+BrandDot.Size = UDim2.new(0, 10, 0, 10)
+BrandDot.Position = UDim2.new(0, 22, 0.5, -5)
+BrandDot.BackgroundColor3 = Themes[QuantumConfig.Theme]
+AddCorner(BrandDot, 5)
+BrandDot.Parent = Topbar
+table.insert(ThemeElements, {inst = BrandDot, prop = "BackgroundColor3"})
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(0, 310, 1, 0)
+Title.Position = UDim2.new(0, 40, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "QUANTUM HUB // v3.5 ULTIMATE"
+Title.TextColor3 = ThemeColors.TextWhite
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 15
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Topbar
+
+local KeybindBadge = Instance.new("TextLabel")
+KeybindBadge.Size = UDim2.new(0, 92, 0, 24)
+KeybindBadge.Position = UDim2.new(1, -144, 0.5, -12)
+KeybindBadge.BackgroundColor3 = ThemeColors.NavBG
+KeybindBadge.Text = "Right Shift"
+KeybindBadge.TextColor3 = ThemeColors.TextGray
+KeybindBadge.Font = Enum.Font.GothamMedium
+KeybindBadge.TextSize = 11
+AddCorner(KeybindBadge, 8)
+AddStroke(KeybindBadge, Color3.fromRGB(38, 42, 60), 1)
+KeybindBadge.Parent = Topbar
+
+local CloseButton = Instance.new("TextButton")
+CloseButton.Size = UDim2.new(0, 28, 0, 28)
+CloseButton.Position = UDim2.new(1, -42, 0.5, -14)
+CloseButton.BackgroundColor3 = ThemeColors.ControlBG
+CloseButton.Text = "×"
+CloseButton.TextColor3 = ThemeColors.TextWhite
+CloseButton.Font = Enum.Font.GothamBold
+CloseButton.TextSize = 18
+CloseButton.AutoButtonColor = false
+AddCorner(CloseButton, 14)
+CloseButton.Parent = Topbar
+
+TrackConnection(CloseButton.MouseEnter:Connect(function()
+    TweenService:Create(CloseButton, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(225, 50, 65)}):Play()
+end))
+TrackConnection(CloseButton.MouseLeave:Connect(function()
+    TweenService:Create(CloseButton, TweenInfo.new(0.2), {BackgroundColor3 = ThemeColors.ControlBG}):Play()
+end))
+
+-- 5-Tab Horizontal Pill Navigation Bar
+local Navbar = Instance.new("Frame")
+Navbar.Size = UDim2.new(1, -40, 0, 38)
+Navbar.Position = UDim2.new(0, 20, 0, 54)
+Navbar.BackgroundColor3 = ThemeColors.NavBG
+Navbar.BorderSizePixel = 0
+AddCorner(Navbar, 12)
+AddStroke(Navbar, Color3.fromRGB(32, 36, 52), 1)
+Navbar.Parent = MainFrame
+
+local NavLayout = Instance.new("UIListLayout")
+NavLayout.FillDirection = Enum.FillDirection.Horizontal
+NavLayout.SortOrder = Enum.SortOrder.LayoutOrder
+NavLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+NavLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+NavLayout.Padding = UDim.new(0, 6)
+NavLayout.Parent = Navbar
+
+local Content = Instance.new("Frame")
+Content.Size = UDim2.new(1, -40, 1, -148)
+Content.Position = UDim2.new(0, 20, 0, 102)
+Content.BackgroundTransparency = 1
+Content.Parent = MainFrame
+
+-- Bottom Telemetry Ribbon
+local BottomBar = Instance.new("Frame")
+BottomBar.Size = UDim2.new(1, -40, 0, 28)
+BottomBar.Position = UDim2.new(0, 20, 1, -36)
+BottomBar.BackgroundColor3 = ThemeColors.NavBG
+BottomBar.BorderSizePixel = 0
+AddCorner(BottomBar, 10)
+AddStroke(BottomBar, Color3.fromRGB(32, 36, 52), 1)
+BottomBar.Parent = MainFrame
+
+local FPSLabel = Instance.new("TextLabel")
+FPSLabel.Size = UDim2.new(0, 95, 1, 0)
+FPSLabel.Position = UDim2.new(0, 14, 0, 0)
+FPSLabel.BackgroundTransparency = 1
+FPSLabel.Text = "FPS: 60"
+FPSLabel.TextColor3 = ThemeColors.TextGray
+FPSLabel.Font = Enum.Font.GothamMedium
+FPSLabel.TextSize = 11
+FPSLabel.TextXAlignment = Enum.TextXAlignment.Left
+FPSLabel.Parent = BottomBar
+
+local PingLabel = Instance.new("TextLabel")
+PingLabel.Size = UDim2.new(0, 110, 1, 0)
+PingLabel.Position = UDim2.new(0, 105, 0, 0)
+PingLabel.BackgroundTransparency = 1
+PingLabel.Text = "Ping: --"
+PingLabel.TextColor3 = ThemeColors.TextGray
+PingLabel.Font = Enum.Font.GothamMedium
+PingLabel.TextSize = 11
+PingLabel.TextXAlignment = Enum.TextXAlignment.Left
+PingLabel.Parent = BottomBar
+
+local TargetStatusLabel = Instance.new("TextLabel")
+TargetStatusLabel.Size = UDim2.new(0, 165, 1, 0)
+TargetStatusLabel.Position = UDim2.new(0, 215, 0, 0)
+TargetStatusLabel.BackgroundTransparency = 1
+TargetStatusLabel.Text = "Locked: None"
+TargetStatusLabel.TextColor3 = ThemeColors.TextGray
+TargetStatusLabel.Font = Enum.Font.GothamMedium
+TargetStatusLabel.TextSize = 11
+TargetStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+TargetStatusLabel.Parent = BottomBar
+
+local EntitiesLabel = Instance.new("TextLabel")
+EntitiesLabel.Size = UDim2.new(0, 165, 1, 0)
+EntitiesLabel.Position = UDim2.new(1, -178, 0, 0)
+EntitiesLabel.BackgroundTransparency = 1
+EntitiesLabel.Text = "Players: 0 | Bots: 0"
+EntitiesLabel.TextColor3 = Themes[QuantumConfig.Theme]
+EntitiesLabel.Font = Enum.Font.GothamSemibold
+EntitiesLabel.TextSize = 11
+EntitiesLabel.TextXAlignment = Enum.TextXAlignment.Right
+EntitiesLabel.Parent = BottomBar
+table.insert(ThemeElements, {inst = EntitiesLabel, prop = "TextColor3"})
+
+local Tabs = {}
+local currentTabName = ""
+
+local function CreateTab(name, order)
+    local TabButton = Instance.new("TextButton")
+    TabButton.LayoutOrder = order
+    TabButton.Size = UDim2.new(0, 104, 0, 28)
+    TabButton.BackgroundColor3 = ThemeColors.NavBG
+    TabButton.Text = name
+    TabButton.TextColor3 = ThemeColors.TextGray
+    TabButton.Font = Enum.Font.GothamSemibold
+    TabButton.TextSize = 12
+    TabButton.AutoButtonColor = false
+    AddCorner(TabButton, 8)
+    TabButton.Parent = Navbar
+    
+    local TabFrame = Instance.new("ScrollingFrame")
+    TabFrame.Size = UDim2.new(1, 0, 1, 0)
+    TabFrame.BackgroundTransparency = 1
+    TabFrame.BorderSizePixel = 0
+    TabFrame.ScrollBarThickness = 3
+    TabFrame.ScrollBarImageColor3 = Themes[QuantumConfig.Theme]
+    TabFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    TabFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    TabFrame.Visible = false
+    TabFrame.Parent = Content
+    table.insert(ThemeElements, {inst = TabFrame, prop = "ScrollBarImageColor3"})
+    
+    local Layout = Instance.new("UIListLayout")
+    Layout.Padding = UDim.new(0, 8)
+    Layout.SortOrder = Enum.SortOrder.LayoutOrder
+    Layout.Parent = TabFrame
+    
+    local Padding = Instance.new("UIPadding")
+    Padding.PaddingTop = UDim.new(0, 2)
+    Padding.PaddingBottom = UDim.new(0, 8)
+    Padding.PaddingLeft = UDim.new(0, 2)
+    Padding.PaddingRight = UDim.new(0, 10)
+    Padding.Parent = TabFrame
+    
+    Tabs[name] = {Button = TabButton, Frame = TabFrame}
+    table.insert(ThemeElements, {
+        inst = TabButton, 
+        prop = "BackgroundColor3", 
+        condition = function() return currentTabName == name end
+    })
+    
+    TrackConnection(TabButton.MouseButton1Click:Connect(function()
+        currentTabName = name
+        for tName, tab in pairs(Tabs) do
+            local isSelected = (tName == name)
+            tab.Frame.Visible = isSelected
+            
+            TweenService:Create(tab.Button, TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                TextColor3 = isSelected and Color3.fromRGB(255, 255, 255) or ThemeColors.TextGray,
+                BackgroundColor3 = isSelected and Themes[QuantumConfig.Theme] or ThemeColors.NavBG
+            }):Play()
+        end
+    end))
+    return TabFrame
+end
+
+-----------------------------------
+-- 5. MODERN CARD-BASED COMPONENTS (WITH DETECTION WARNINGS)
+-----------------------------------
+local nextOrder = 0
+local function GetOrder()
+    nextOrder = nextOrder + 1
+    return nextOrder
+end
+
+local function CreateSectionHeader(parent, titleText)
+    local Header = Instance.new("TextLabel")
+    Header.LayoutOrder = GetOrder()
+    Header.Size = UDim2.new(1, 0, 0, 22)
+    Header.BackgroundTransparency = 1
+    Header.Text = string.upper(titleText)
+    Header.TextColor3 = Themes[QuantumConfig.Theme]
+    Header.Font = Enum.Font.GothamBold
+    Header.TextSize = 11
+    Header.TextXAlignment = Enum.TextXAlignment.Left
+    Header.Parent = parent
+    table.insert(ThemeElements, {inst = Header, prop = "TextColor3"})
+end
+
+local function CreateToggle(parent, name, configKey, callback, warningTag)
+    local Frame = Instance.new("TextButton")
+    Frame.LayoutOrder = GetOrder()
+    Frame.Size = UDim2.new(1, 0, 0, 42)
+    Frame.BackgroundColor3 = ThemeColors.CardBG
+    Frame.Text = ""
+    Frame.AutoButtonColor = false
+    AddCorner(Frame, 10)
+    local defaultBorder = warningTag and Color3.fromRGB(70, 48, 28) or Color3.fromRGB(36, 40, 58)
+    local FrameStroke = AddStroke(Frame, defaultBorder, 1)
+    Frame.Parent = parent
+    
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, warningTag and -195 or -70, 1, 0)
+    Label.Position = UDim2.new(0, 16, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = name
+    Label.TextColor3 = ThemeColors.TextWhite
+    Label.Font = Enum.Font.GothamSemibold
+    Label.TextSize = 13
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+
+    if warningTag then
+        local WarnBadge = Instance.new("TextLabel")
+        WarnBadge.Size = UDim2.new(0, 108, 0, 20)
+        WarnBadge.Position = UDim2.new(1, -168, 0.5, -10)
+        WarnBadge.BackgroundColor3 = Color3.fromRGB(48, 30, 20)
+        WarnBadge.Text = warningTag
+        WarnBadge.TextColor3 = ThemeColors.WarningOrange
+        WarnBadge.Font = Enum.Font.GothamBold
+        WarnBadge.TextSize = 10
+        AddCorner(WarnBadge, 6)
+        AddStroke(WarnBadge, ThemeColors.WarningOrange, 1)
+        WarnBadge.Parent = Frame
+    end
+    
+    local initState = QuantumConfig[configKey]
+    local SwitchBG = Instance.new("Frame")
+    SwitchBG.Size = UDim2.new(0, 38, 0, 20)
+    SwitchBG.Position = UDim2.new(1, -52, 0.5, -10)
+    SwitchBG.BackgroundColor3 = initState and (warningTag and ThemeColors.WarningOrange or Themes[QuantumConfig.Theme]) or ThemeColors.ControlBG
+    AddCorner(SwitchBG, 10)
+    SwitchBG.Parent = Frame
+    
+    local SwitchKnob = Instance.new("Frame")
+    SwitchKnob.Size = UDim2.new(0, 14, 0, 14)
+    SwitchKnob.Position = initState and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+    SwitchKnob.BackgroundColor3 = initState and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(130, 136, 165)
+    AddCorner(SwitchKnob, 7)
+    SwitchKnob.Parent = SwitchBG
+    
+    if not warningTag then
+        table.insert(ThemeElements, {
+            inst = SwitchBG, 
+            prop = "BackgroundColor3", 
+            condition = function() return QuantumConfig[configKey] end
+        })
+    end
+    
+    local function SyncVisualState()
+        local state = QuantumConfig[configKey]
+        local activeCol = warningTag and ThemeColors.WarningOrange or Themes[QuantumConfig.Theme]
+        TweenService:Create(SwitchKnob, TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+            Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7),
+            BackgroundColor3 = state and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(130, 136, 165)
+        }):Play()
+        TweenService:Create(SwitchBG, TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+            BackgroundColor3 = state and activeCol or ThemeColors.ControlBG
+        }):Play()
+    end
+    table.insert(UIControlRefreshers, SyncVisualState)
+
+    TrackConnection(Frame.MouseEnter:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardHover}):Play() 
+        TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = warningTag and ThemeColors.WarningOrange or Themes[QuantumConfig.Theme]}):Play()
+    end))
+    TrackConnection(Frame.MouseLeave:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardBG}):Play() 
+        TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = defaultBorder}):Play()
+    end))
+    
+    TrackConnection(Frame.MouseButton1Click:Connect(function()
+        QuantumConfig[configKey] = not QuantumConfig[configKey]
+        SyncVisualState()
+        if QuantumConfig[configKey] and warningTag then
+            Notify("⚠ Anti-Cheat Warning", name .. " is enabled. High detection risk in strict games!", 3.2, true)
+        end
+        if configKey == "Fullbright" or configKey == "NoFog" then
+            UpdateWorld()
+        end
+        if callback then task.spawn(callback, QuantumConfig[configKey]) end
+    end))
+end
+
+local function CreateSlider(parent, name, min, max, configKey, isFloat, callback, warnThreshold, warnText)
+    local Frame = Instance.new("Frame")
+    Frame.LayoutOrder = GetOrder()
+    Frame.Size = UDim2.new(1, 0, 0, 56)
+    Frame.BackgroundColor3 = ThemeColors.CardBG
+    AddCorner(Frame, 10)
+    local FrameStroke = AddStroke(Frame, Color3.fromRGB(36, 40, 58), 1)
+    Frame.Parent = parent
+    
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -210, 0, 20)
+    Label.Position = UDim2.new(0, 16, 0, 8)
+    Label.BackgroundTransparency = 1
+    Label.Text = name
+    Label.TextColor3 = ThemeColors.TextWhite
+    Label.Font = Enum.Font.GothamSemibold
+    Label.TextSize = 13
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+
+    local RiskBadge = nil
+    if warnThreshold then
+        RiskBadge = Instance.new("TextLabel")
+        RiskBadge.Size = UDim2.new(0, 155, 0, 18)
+        RiskBadge.Position = UDim2.new(1, -225, 0, 9)
+        RiskBadge.BackgroundColor3 = Color3.fromRGB(55, 20, 24)
+        RiskBadge.Text = warnText or ("⚠ DETECTABLE >" .. tostring(warnThreshold) .. "%")
+        RiskBadge.TextColor3 = ThemeColors.DangerRed
+        RiskBadge.Font = Enum.Font.GothamBold
+        RiskBadge.TextSize = 10
+        AddCorner(RiskBadge, 5)
+        AddStroke(RiskBadge, ThemeColors.DangerRed, 1)
+        RiskBadge.Visible = (QuantumConfig[configKey] > warnThreshold)
+        RiskBadge.Parent = Frame
+    end
+    
+    local ValueLabel = Instance.new("TextLabel")
+    ValueLabel.Size = UDim2.new(0, 55, 0, 20)
+    ValueLabel.Position = UDim2.new(1, -70, 0, 8)
+    ValueLabel.BackgroundTransparency = 1
+    ValueLabel.Text = tostring(QuantumConfig[configKey]) .. (warnThreshold == 70 and "%" or "")
+    ValueLabel.TextColor3 = Themes[QuantumConfig.Theme]
+    ValueLabel.Font = Enum.Font.GothamBold
+    ValueLabel.TextSize = 13
+    ValueLabel.TextXAlignment = Enum.TextXAlignment.Right
+    ValueLabel.Parent = Frame
+    
+    local SliderBG = Instance.new("TextButton")
+    SliderBG.Size = UDim2.new(1, -32, 0, 8)
+    SliderBG.Position = UDim2.new(0, 16, 0, 36)
+    SliderBG.BackgroundColor3 = ThemeColors.ControlBG
+    SliderBG.Text = ""
+    SliderBG.AutoButtonColor = false
+    AddCorner(SliderBG, 4)
+    SliderBG.Parent = Frame
+    
+    local initRel = math.clamp((QuantumConfig[configKey] - min) / (max - min), 0, 1)
+    local Fill = Instance.new("Frame")
+    Fill.Size = UDim2.new(initRel, 0, 1, 0)
+    Fill.BackgroundColor3 = Themes[QuantumConfig.Theme]
+    AddCorner(Fill, 4)
+    Fill.Parent = SliderBG
+    
+    table.insert(ThemeElements, {
+        inst = ValueLabel, 
+        prop = "TextColor3",
+        condition = function() return not (warnThreshold and QuantumConfig[configKey] > warnThreshold) end
+    })
+    table.insert(ThemeElements, {
+        inst = Fill, 
+        prop = "BackgroundColor3",
+        condition = function() return not (warnThreshold and QuantumConfig[configKey] > warnThreshold) end
+    })
+    
+    local warnedAlready = (warnThreshold and QuantumConfig[configKey] > warnThreshold) or false
+
+    local function RefreshWarningVisuals(val)
+        local isOver = (warnThreshold ~= nil and val > warnThreshold)
+        if RiskBadge then
+            RiskBadge.Visible = isOver
+        end
+        if isOver then
+            Fill.BackgroundColor3 = ThemeColors.DangerRed
+            ValueLabel.TextColor3 = ThemeColors.DangerRed
+            FrameStroke.Color = ThemeColors.DangerRed
+            if not warnedAlready then
+                warnedAlready = true
+                Notify("⚠ High Detection Risk", name .. " is over " .. tostring(warnThreshold) .. "%! Hard-locking can trigger anti-cheat.", 3.0, true)
+            end
+        else
+            warnedAlready = false
+            Fill.BackgroundColor3 = Themes[QuantumConfig.Theme]
+            ValueLabel.TextColor3 = Themes[QuantumConfig.Theme]
+            FrameStroke.Color = Color3.fromRGB(36, 40, 58)
+        end
+    end
+
+    local function SyncSliderState()
+        local val = QuantumConfig[configKey]
+        local r = math.clamp((val - min) / (max - min), 0, 1)
+        Fill.Size = UDim2.new(r, 0, 1, 0)
+        ValueLabel.Text = tostring(val) .. (warnThreshold == 70 and "%" or "")
+        RefreshWarningVisuals(val)
+    end
+    SyncSliderState()
+    table.insert(UIControlRefreshers, SyncSliderState)
+
+    TrackConnection(Frame.MouseEnter:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardHover}):Play() 
+        if not (warnThreshold and QuantumConfig[configKey] > warnThreshold) then
+            TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = Themes[QuantumConfig.Theme]}):Play()
+        end
+    end))
+    TrackConnection(Frame.MouseLeave:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardBG}):Play() 
+        if not (warnThreshold and QuantumConfig[configKey] > warnThreshold) then
+            TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = Color3.fromRGB(36, 40, 58)}):Play()
+        end
+    end))
+
+    local draggingSlider = false
+    local function UpdateSliderFromInput(inputPosX)
+        local absSize = math.max(SliderBG.AbsoluteSize.X, 1)
+        local rel = math.clamp((inputPosX - SliderBG.AbsolutePosition.X) / absSize, 0, 1)
+        Fill.Size = UDim2.new(rel, 0, 1, 0)
+        
+        local value = min + (max - min) * rel
+        if not isFloat then 
+            value = math.floor(value + 0.5) 
+        else 
+            value = math.floor(value * 100 + 0.5) / 100 
+        end
+        
+        QuantumConfig[configKey] = value
+        ValueLabel.Text = tostring(value) .. (warnThreshold == 70 and "%" or "")
+        RefreshWarningVisuals(value)
+        
+        if configKey == "MoonSize" or configKey == "Brightness" then 
+            UpdateWorld() 
+        end
+        if callback then callback(value) end
+    end
+
+    TrackConnection(SliderBG.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            draggingSlider = true
+            UpdateSliderFromInput(input.Position.X)
+        end
+    end))
+    TrackConnection(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then 
+            draggingSlider = false 
+        end
+    end))
+    TrackConnection(UserInputService.InputChanged:Connect(function(input)
+        if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            UpdateSliderFromInput(input.Position.X)
+        end
+    end))
+end
+
+local function CreateCycle(parent, name, options, configKey, isThemeCycle)
+    local Frame = Instance.new("TextButton")
+    Frame.LayoutOrder = GetOrder()
+    Frame.Size = UDim2.new(1, 0, 0, 42)
+    Frame.BackgroundColor3 = ThemeColors.CardBG
+    Frame.Text = ""
+    Frame.AutoButtonColor = false
+    AddCorner(Frame, 10)
+    local FrameStroke = AddStroke(Frame, Color3.fromRGB(36, 40, 58), 1)
+    Frame.Parent = parent
+    
+    TrackConnection(Frame.MouseEnter:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardHover}):Play() 
+        TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = Themes[QuantumConfig.Theme]}):Play()
+    end))
+    TrackConnection(Frame.MouseLeave:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardBG}):Play() 
+        TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = Color3.fromRGB(36, 40, 58)}):Play()
+    end))
+    
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -155, 1, 0)
+    Label.Position = UDim2.new(0, 16, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = name
+    Label.TextColor3 = ThemeColors.TextWhite
+    Label.Font = Enum.Font.GothamSemibold
+    Label.TextSize = 13
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+    
+    local ValueBox = Instance.new("Frame")
+    ValueBox.Size = UDim2.new(0, 130, 0, 26)
+    ValueBox.Position = UDim2.new(1, -144, 0.5, -13)
+    ValueBox.BackgroundColor3 = ThemeColors.ControlBG
+    AddCorner(ValueBox, 7)
+    ValueBox.Parent = Frame
+    
+    local ValueText = Instance.new("TextLabel")
+    ValueText.Size = UDim2.new(1, -8, 1, 0)
+    ValueText.Position = UDim2.new(0, 4, 0, 0)
+    ValueText.BackgroundTransparency = 1
+    ValueText.TextColor3 = Themes[QuantumConfig.Theme]
+    ValueText.Font = Enum.Font.GothamBold
+    ValueText.TextSize = 11
+    ValueText.Parent = ValueBox
+    table.insert(ThemeElements, {inst = ValueText, prop = "TextColor3"})
+    
+    local index = 1
+    local function SyncCycleState()
+        for i, opt in ipairs(options) do
+            if opt == QuantumConfig[configKey] then 
+                index = i 
+                break 
+            end
+        end
+        ValueText.Text = options[index]
+    end
+    SyncCycleState()
+    table.insert(UIControlRefreshers, SyncCycleState)
+    
+    TrackConnection(Frame.MouseButton1Click:Connect(function()
+        index = (index % #options) + 1
+        QuantumConfig[configKey] = options[index]
+        ValueText.Text = options[index]
+        if isThemeCycle then UpdateTheme() end
+        if configKey == "WorldTheme" then UpdateWorld() end
+    end))
+end
+
+local function CreateKeybindPicker(parent, name)
+    local Frame = Instance.new("TextButton")
+    Frame.LayoutOrder = GetOrder()
+    Frame.Size = UDim2.new(1, 0, 0, 42)
+    Frame.BackgroundColor3 = ThemeColors.CardBG
+    Frame.Text = ""
+    Frame.AutoButtonColor = false
+    AddCorner(Frame, 10)
+    local FrameStroke = AddStroke(Frame, Color3.fromRGB(36, 40, 58), 1)
+    Frame.Parent = parent
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -155, 1, 0)
+    Label.Position = UDim2.new(0, 16, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = name
+    Label.TextColor3 = ThemeColors.TextWhite
+    Label.Font = Enum.Font.GothamSemibold
+    Label.TextSize = 13
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+
+    local ValueBox = Instance.new("Frame")
+    ValueBox.Size = UDim2.new(0, 130, 0, 26)
+    ValueBox.Position = UDim2.new(1, -144, 0.5, -13)
+    ValueBox.BackgroundColor3 = ThemeColors.ControlBG
+    AddCorner(ValueBox, 7)
+    ValueBox.Parent = Frame
+
+    local ValueText = Instance.new("TextLabel")
+    ValueText.Size = UDim2.new(1, -8, 1, 0)
+    ValueText.Position = UDim2.new(0, 4, 0, 0)
+    ValueText.BackgroundTransparency = 1
+    ValueText.Text = QuantumConfig.AimbotKeyName
+    ValueText.TextColor3 = Themes[QuantumConfig.Theme]
+    ValueText.Font = Enum.Font.GothamBold
+    ValueText.TextSize = 11
+    ValueText.Parent = ValueBox
+    table.insert(ThemeElements, {inst = ValueText, prop = "TextColor3"})
+
+    table.insert(UIControlRefreshers, function()
+        ValueText.Text = QuantumConfig.AimbotKeyName
+    end)
+
+    TrackConnection(Frame.MouseButton1Click:Connect(function()
+        if BindingKey then return end
+        BindingKey = true
+        ValueText.Text = "[Press Any Key...]"
+    end))
+
+    TrackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if not BindingKey then return end
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            if input.KeyCode ~= Enum.KeyCode.Unknown and input.KeyCode ~= Enum.KeyCode.RightShift then
+                QuantumConfig.AimbotKey = input.KeyCode
+                QuantumConfig.AimbotKeyName = input.KeyCode.Name
+                ValueText.Text = input.KeyCode.Name
+                BindingKey = false
+            end
+        elseif input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.MouseButton2 or input.UserInputType == Enum.UserInputType.MouseButton3 then
+            QuantumConfig.AimbotKey = input.UserInputType
+            QuantumConfig.AimbotKeyName = input.UserInputType.Name
+            ValueText.Text = input.UserInputType.Name
+            BindingKey = false
+        end
+    end))
+end
+
+local function CreateHueSpectrum(parent, name, configKey)
+    local Frame = Instance.new("Frame")
+    Frame.LayoutOrder = GetOrder()
+    Frame.Size = UDim2.new(1, 0, 0, 62)
+    Frame.BackgroundColor3 = ThemeColors.CardBG
+    AddCorner(Frame, 10)
+    local FrameStroke = AddStroke(Frame, Color3.fromRGB(36, 40, 58), 1)
+    Frame.Parent = parent
+    
+    TrackConnection(Frame.MouseEnter:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardHover}):Play() 
+        TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = Themes[QuantumConfig.Theme]}):Play()
+    end))
+    TrackConnection(Frame.MouseLeave:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardBG}):Play() 
+        TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = Color3.fromRGB(36, 40, 58)}):Play()
+    end))
+    
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -60, 0, 20)
+    Label.Position = UDim2.new(0, 16, 0, 8)
+    Label.BackgroundTransparency = 1
+    Label.Text = name
+    Label.TextColor3 = ThemeColors.TextWhite
+    Label.Font = Enum.Font.GothamSemibold
+    Label.TextSize = 13
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+    
+    local PreviewBox = Instance.new("Frame")
+    PreviewBox.Size = UDim2.new(0, 20, 0, 20)
+    PreviewBox.Position = UDim2.new(1, -36, 0, 8)
+    PreviewBox.BackgroundColor3 = QuantumConfig[configKey]
+    AddCorner(PreviewBox, 6)
+    PreviewBox.Parent = Frame
+    
+    local SliderBG = Instance.new("TextButton")
+    SliderBG.Size = UDim2.new(1, -32, 0, 12)
+    SliderBG.Position = UDim2.new(0, 16, 0, 36)
+    SliderBG.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    SliderBG.Text = ""
+    SliderBG.AutoButtonColor = false
+    AddCorner(SliderBG, 6)
+    SliderBG.Parent = Frame
+    
+    local UIGradient = Instance.new("UIGradient")
+    UIGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)),
+        ColorSequenceKeypoint.new(0.167, Color3.fromRGB(255, 255, 0)),
+        ColorSequenceKeypoint.new(0.333, Color3.fromRGB(0, 255, 0)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0, 255, 255)),
+        ColorSequenceKeypoint.new(0.667, Color3.fromRGB(0, 0, 255)),
+        ColorSequenceKeypoint.new(0.833, Color3.fromRGB(255, 0, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 0, 0))
+    })
+    UIGradient.Parent = SliderBG
+    
+    local Pointer = Instance.new("Frame")
+    Pointer.Size = UDim2.new(0, 6, 1, 4)
+    Pointer.Position = UDim2.new(0, 0, 0, -2)
+    Pointer.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Pointer.BorderSizePixel = 0
+    AddCorner(Pointer, 3)
+    Pointer.Parent = SliderBG
+    
+    local dragging = false
+    local function UpdateHue(inputPosX)
+        local absSize = math.max(SliderBG.AbsoluteSize.X, 1)
+        local rel = math.clamp((inputPosX - SliderBG.AbsolutePosition.X) / absSize, 0, 0.999)
+        Pointer.Position = UDim2.new(rel, -3, 0, -2)
+        local newColor = Color3.fromHSV(rel, 0.95, 1)
+        QuantumConfig[configKey] = newColor
+        PreviewBox.BackgroundColor3 = newColor
+    end
+
+    TrackConnection(SliderBG.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            UpdateHue(input.Position.X)
+        end
+    end))
+    TrackConnection(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then 
+            dragging = false 
+        end
+    end))
+    TrackConnection(UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            UpdateHue(input.Position.X)
+        end
+    end))
+end
+
+local function CreateActionButton(parent, name, buttonText, callback)
+    local Frame = Instance.new("TextButton")
+    Frame.LayoutOrder = GetOrder()
+    Frame.Size = UDim2.new(1, 0, 0, 42)
+    Frame.BackgroundColor3 = ThemeColors.CardBG
+    Frame.Text = ""
+    Frame.AutoButtonColor = false
+    AddCorner(Frame, 10)
+    local FrameStroke = AddStroke(Frame, Color3.fromRGB(36, 40, 58), 1)
+    Frame.Parent = parent
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -130, 1, 0)
+    Label.Position = UDim2.new(0, 16, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = name
+    Label.TextColor3 = ThemeColors.TextWhite
+    Label.Font = Enum.Font.GothamSemibold
+    Label.TextSize = 13
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+
+    local Badge = Instance.new("TextLabel")
+    Badge.Size = UDim2.new(0, 100, 0, 26)
+    Badge.Position = UDim2.new(1, -114, 0.5, -13)
+    Badge.BackgroundColor3 = Themes[QuantumConfig.Theme]
+    Badge.Text = buttonText
+    Badge.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Badge.Font = Enum.Font.GothamBold
+    Badge.TextSize = 11
+    AddCorner(Badge, 7)
+    Badge.Parent = Frame
+    table.insert(ThemeElements, {inst = Badge, prop = "BackgroundColor3"})
+
+    TrackConnection(Frame.MouseEnter:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardHover}):Play() 
+        TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = Themes[QuantumConfig.Theme]}):Play()
+    end))
+    TrackConnection(Frame.MouseLeave:Connect(function() 
+        TweenService:Create(Frame, TweenInfo.new(0.18), {BackgroundColor3 = ThemeColors.CardBG}):Play() 
+        TweenService:Create(FrameStroke, TweenInfo.new(0.18), {Color = Color3.fromRGB(36, 40, 58)}):Play()
+    end))
+
+    TrackConnection(Frame.MouseButton1Click:Connect(function()
+        if callback then callback() end
+    end))
+end
+
+-----------------------------------
+-- 6. SMOOTH DRAGGING & TOGGLE MECHANICS
+-----------------------------------
+local function ToggleMenu()
+    QuantumConfig.MenuOpen = not QuantumConfig.MenuOpen
+    
+    if QuantumConfig.MenuOpen then
+        MainFrame.Visible = true
+        MainFrame.Active = true
+        TweenService:Create(MainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+            GroupTransparency = 0,
+            Size = UDim2.new(0, 590, 0, 435)
+        }):Play()
+    else
+        MainFrame.Active = false
+        TweenService:Create(MainFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+            GroupTransparency = 1,
+            Size = UDim2.new(0, 560, 0, 410)
+        }):Play()
+        task.delay(0.2, function()
+            if not QuantumConfig.MenuOpen then
+                MainFrame.Visible = false
+            end
+        end)
+    end
+end
+
+TrackConnection(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and not BindingKey and input.KeyCode == Enum.KeyCode.RightShift then
+        ToggleMenu()
+    end
+end))
+
+TrackConnection(CloseButton.MouseButton1Click:Connect(ToggleMenu))
+
+local draggingToggle = false
+local toggleDragMoved = false
+local toggleDragStart, toggleStartPos
+
+TrackConnection(OpenToggleButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingToggle = true
+        toggleDragMoved = false
+        toggleDragStart = input.Position
+        toggleStartPos = OpenToggleButton.Position
+    end
+end))
+
+TrackConnection(OpenToggleButton.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if draggingToggle and not toggleDragMoved then
+            ToggleMenu()
+        end
+        draggingToggle = false
+    end
+end))
+
+local draggingMenu = false
+local dragStart, startPos
+
+TrackConnection(Topbar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingMenu = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+    end
+end))
+
+TrackConnection(Topbar.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        draggingMenu = false
+    end
+end))
+
+TrackConnection(UserInputService.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        if draggingToggle then
+            local delta = input.Position - toggleDragStart
+            if delta.Magnitude > 5 then
+                toggleDragMoved = true
+            end
+            OpenToggleButton.Position = UDim2.new(
+                toggleStartPos.X.Scale, toggleStartPos.X.Offset + delta.X,
+                toggleStartPos.Y.Scale, toggleStartPos.Y.Offset + delta.Y
+            )
+        elseif draggingMenu then
+            local delta = input.Position - dragStart
+            local targetGoal = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+            TweenService:Create(MainFrame, TweenInfo.new(0.08, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+                Position = targetGoal
+            }):Play()
+        end
+    end
+end))
+
+-----------------------------------
+-- 7. POPULATE 5 TABS (WITH WARNING BADGES)
+-----------------------------------
+local CombatTab = CreateTab("Combat", 1)
+local VisualsTab = CreateTab("Visuals", 2)
+local MovementTab = CreateTab("Movement", 3)
+local WorldTab = CreateTab("World", 4)
+local SettingsTab = CreateTab("Settings", 5)
+
+currentTabName = "Combat"
+Tabs["Combat"].Button.BackgroundColor3 = Themes[QuantumConfig.Theme]
+Tabs["Combat"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
+Tabs["Combat"].Frame.Visible = true
+
+-- 1. Combat Elements
+CreateSectionHeader(CombatTab, "Aimbot & Silent Aim")
+CreateToggle(CombatTab, "Enable Camera Aimbot", "Aimbot")
+CreateKeybindPicker(CombatTab, "Aimbot Hold Keybind")
+CreateSlider(CombatTab, "Aimbot Lock Speed", 1, 100, "Smoothness", false, nil, 70, "⚠ DETECTABLE >70%")
+CreateCycle(CombatTab, "Camera Aimbot Part", {"Head", "HumanoidRootPart"}, "TargetPart", false)
+CreateToggle(CombatTab, "Universal Silent Aim", "SilentAim", nil, "⚠ DETECTABLE")
+CreateCycle(CombatTab, "Silent Aim Target Part", {"Head", "HumanoidRootPart", "Random", "Closest"}, "SilentAimPart", false)
+CreateSlider(CombatTab, "Silent Aim Hit Chance (%)", 1, 100, "HitChance", false)
+
+CreateSectionHeader(CombatTab, "Targeting, FOV & Prediction")
+CreateToggle(CombatTab, "Show Target Lock Snapline & Ring", "ShowTargetLine")
+CreateToggle(CombatTab, "Wall Check (Visible Only)", "WallCheck")
+CreateToggle(CombatTab, "Prioritize Enemies Behind Walls", "PrioritizeBehindWalls", nil, "⚠ BLATANT")
+CreateToggle(CombatTab, "Target Velocity Prediction", "Prediction")
+CreateSlider(CombatTab, "Prediction Factor (Secs)", 0, 0.5, "PredictionAmount", true)
+CreateToggle(CombatTab, "Show FOV Circle", "ShowFOV")
+CreateToggle(CombatTab, "Filled Translucent FOV Circle", "FilledFOV")
+CreateSlider(CombatTab, "FOV Radius (px)", 30, 800, "FOVRadius", false)
+
+CreateSectionHeader(CombatTab, "TriggerBot (Auto Shoot) & Hitbox")
+CreateToggle(CombatTab, "Enable TriggerBot (Crosshair Auto Shoot)", "TriggerBot")
+CreateToggle(CombatTab, "Auto-Shoot on Silent Aim Lock", "TriggerWithSilentAim", nil, "⚠ DETECTABLE")
+CreateSlider(CombatTab, "TriggerBot Fire Delay (Secs)", 0, 1, "TriggerDelay", true)
+CreateToggle(CombatTab, "Universal Hitbox Expander", "HitboxExpander", nil, "⚠ DETECTABLE")
+CreateCycle(CombatTab, "Hitbox Target Part", {"HumanoidRootPart", "Head", "Torso"}, "HitboxPart", false)
+CreateSlider(CombatTab, "Hitbox Size (Studs)", 2, 50, "HitboxSize", false, nil, 15, "⚠ BLATANT >15")
+CreateSlider(CombatTab, "Hitbox Transparency", 0.1, 1, "HitboxTransparency", true)
+
+-- 2. Visuals Elements
+CreateSectionHeader(VisualsTab, "Player & Bot ESP (Undetected Drawing)")
+CreateToggle(VisualsTab, "2D Box ESP", "BoxESP")
+CreateToggle(VisualsTab, "Name & Distance ESP", "NameESP")
+CreateToggle(VisualsTab, "Side Health Bar ESP", "HealthESP")
+CreateToggle(VisualsTab, "Head Dot ESP", "HeadDotESP")
+CreateToggle(VisualsTab, "2D Skeleton ESP (R15 & R6)", "SkeletonESP")
+CreateToggle(VisualsTab, "Snapline Tracers", "Tracers")
+CreateCycle(VisualsTab, "Tracer Origin Point", {"Bottom", "Center", "Mouse"}, "TracerOrigin", false)
+CreateToggle(VisualsTab, "Highlight Chams ESP", "ChamsESP")
+
+CreateSectionHeader(VisualsTab, "ESP Color & Range")
+CreateToggle(VisualsTab, "Rainbow Chroma ESP (Auto-Cycle)", "RainbowESP")
+CreateSlider(VisualsTab, "Max Render Distance (Studs)", 100, 5000, "MaxDistance", false)
+CreateHueSpectrum(VisualsTab, "Master ESP Color", "ESP_Color")
+
+-- 3. Movement & LocalPlayer Elements (Marked with Anti-Cheat Warnings)
+CreateSectionHeader(MovementTab, "Speed & Jump Overrides (High Detection Risk)")
+CreateToggle(MovementTab, "Custom WalkSpeed", "CustomWalkSpeed", nil, "⚠ DETECTABLE")
+CreateSlider(MovementTab, "WalkSpeed Value", 16, 250, "WalkSpeed", false, nil, 35, "⚠ HIGH RISK >35")
+CreateToggle(MovementTab, "Custom JumpPower", "CustomJumpPower", nil, "⚠ DETECTABLE")
+CreateSlider(MovementTab, "JumpPower Value", 50, 300, "JumpPower", false, nil, 85, "⚠ HIGH RISK >85")
+CreateToggle(MovementTab, "Infinite Jump (Spacebar)", "InfiniteJump", nil, "⚠ DETECTABLE")
+
+CreateSectionHeader(MovementTab, "Flight, Physics & Camera")
+CreateToggle(MovementTab, "CFrame Flight (WASD + Space/Shift)", "Fly", nil, "⚠ DETECTABLE")
+CreateSlider(MovementTab, "Flight Speed", 15, 250, "FlySpeed", false, nil, 80, "⚠ HIGH RISK >80")
+CreateToggle(MovementTab, "Noclip (Walk Through Walls)", "Noclip", function(enabled)
+    if not enabled then
+        for part, canCol in pairs(LocalPlayerNoclipCache) do
+            if part and part.Parent then
+                pcall(function() part.CanCollide = canCol end)
+            end
+        end
+        table.clear(LocalPlayerNoclipCache)
+    end
+end, "⚠ DETECTABLE")
+CreateToggle(MovementTab, "SpinBot (Anti-Aim Rotation)", "SpinBot", nil, "⚠ BLATANT")
+CreateSlider(MovementTab, "SpinBot Speed", 5, 100, "SpinSpeed", false)
+CreateToggle(MovementTab, "Override Camera FOV", "CustomCameraFOV")
+CreateSlider(MovementTab, "Camera FOV Value", 40, 120, "CameraFOV", false)
+
+-- 4. World Elements
+CreateSectionHeader(WorldTab, "Atmosphere & Sky")
+CreateCycle(WorldTab, "Sky & Atmosphere Preset", WorldOptionsList, "WorldTheme", false)
+CreateToggle(WorldTab, "Fullbright (Maximum Visibility)", "Fullbright")
+CreateToggle(WorldTab, "Remove Fog & Atmosphere Density", "NoFog")
+CreateSlider(WorldTab, "Moon Angular Size", 0, 100, "MoonSize", false)
+CreateSlider(WorldTab, "World Brightness", 0, 10, "Brightness", true)
+CreateToggle(WorldTab, "Quantum Character Aura", "QuantumAura")
+
+-- 5. Settings Elements
+CreateSectionHeader(SettingsTab, "Universal Deep-Workspace AI & Bot Scanner")
+CreateToggle(SettingsTab, "Target & Render All Game Bots / AI / NPCs", "IncludeBots")
+CreateToggle(SettingsTab, "Universal Team Check (Players & AI)", "TeamCheck")
+CreateToggle(SettingsTab, "Ignore Spawn ForceField Targets", "IgnoreForceField")
+
+CreateSectionHeader(SettingsTab, "Configuration & Server Utilities")
+CreateCycle(SettingsTab, "Interface Accent Theme", ThemeOptionsList, "Theme", true)
+
+local ConfigFileName = "QuantumHub_Universal_v35.json"
+CreateActionButton(SettingsTab, "Save Current Configuration", "SAVE", function()
+    if type(writefile) == "function" then
+        local exportData = {}
+        for k, v in pairs(QuantumConfig) do
+            if typeof(v) == "boolean" or typeof(v) == "number" or typeof(v) == "string" then
+                exportData[k] = v
+            end
+        end
+        pcall(function()
+            writefile(ConfigFileName, HttpService:JSONEncode(exportData))
+        end)
+        Notify("Config Saved", "Saved settings to " .. ConfigFileName, 2.5, false)
+    else
+        Notify("Executor Notice", "writefile() is not supported on this executor.", 2.5, true)
+    end
+end)
+
+CreateActionButton(SettingsTab, "Load Saved Configuration", "LOAD", function()
+    if type(readfile) == "function" and type(isfile) == "function" and isfile(ConfigFileName) then
+        local ok, decoded = pcall(function()
+            return HttpService:JSONDecode(readfile(ConfigFileName))
+        end)
+        if ok and type(decoded) == "table" then
+            for k, v in pairs(decoded) do
+                if QuantumConfig[k] ~= nil and typeof(QuantumConfig[k]) == typeof(v) then
+                    QuantumConfig[k] = v
+                end
+            end
+            for _, refresher in ipairs(UIControlRefreshers) do
+                pcall(refresher)
+            end
+            UpdateTheme()
+            UpdateWorld()
+            Notify("Config Loaded", "Restored settings from " .. ConfigFileName, 2.5, false)
+        end
+    else
+        Notify("Config Not Found", "Save a configuration first before loading.", 2.5, true)
+    end
+end)
+
+CreateActionButton(SettingsTab, "Rejoin Current Server", "REJOIN", function()
+    Notify("Rejoining", "Teleporting back to current server...", 2, false)
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end)
+end)
+
+CreateActionButton(SettingsTab, "Server Hop (Find New Server)", "HOP", function()
+    Notify("Server Hop", "Searching for a new server...", 2.5, false)
+    task.spawn(function()
+        local ok, res = pcall(function()
+            return HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"))
+        end)
+        if ok and res and res.data then
+            for _, srv in ipairs(res.data) do
+                if type(srv) == "table" and srv.playing < srv.maxPlayers and srv.id ~= game.JobId then
+                    TeleportService:TeleportToPlaceInstance(game.PlaceId, srv.id, LocalPlayer)
+                    return
+                end
+            end
+        end
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    end)
+end)
+
+-----------------------------------
+-- 8. DEEP-WORKSPACE UNIVERSAL AI, BOT & PLAYER ENGINE
+-----------------------------------
+local function GetCharacterHumanoid(char)
+    if not char then return nil end
+    return char:FindFirstChildOfClass("Humanoid") or char:FindFirstChild("Humanoid")
+end
+
+local function GetCharacterRoot(char)
+    if not char then return nil end
+    local root = char:FindFirstChild("HumanoidRootPart")
+        or char:FindFirstChild("Torso")
+        or char:FindFirstChild("UpperTorso")
+        or char:FindFirstChild("LowerTorso")
+        or char:FindFirstChild("RootPart")
+        or char:FindFirstChild("Root")
+        or char:FindFirstChild("Hitbox")
+        or char:FindFirstChild("Body")
+        or char.PrimaryPart
+        or char:FindFirstChild("Head")
+
+    if root and root:IsA("BasePart") then
+        return root
+    end
+    return char:FindFirstChildWhichIsA("BasePart")
+end
+
+local function GetCharacterHead(char)
+    if not char then return nil end
+    local head = char:FindFirstChild("Head")
+        or char:FindFirstChild("HeadHitbox")
+        or char:FindFirstChild("FakeHead")
+        or char:FindFirstChild("Crit")
+    if head and head:IsA("BasePart") then
+        return head
+    end
+    return GetCharacterRoot(char)
+end
+
+local function GetEntityHealthAndMax(char)
+    if not char then return 0, 0 end
+    local hum = GetCharacterHumanoid(char)
+    if hum then
+        if hum.MaxHealth > 0 then
+            return hum.Health, hum.MaxHealth
+        else
+            return 100, 100
+        end
+    end
+
+    local attrHp = char:GetAttribute("Health") or char:GetAttribute("HP") or char:GetAttribute("CurrentHealth")
+    local attrMax = char:GetAttribute("MaxHealth") or char:GetAttribute("MaxHP") or 100
+    if type(attrHp) == "number" then
+        return attrHp, (type(attrMax) == "number" and attrMax > 0) and attrMax or 100
+    end
+
+    local hpObj = char:FindFirstChild("Health") or char:FindFirstChild("HP")
+    if hpObj and (hpObj:IsA("NumberValue") or hpObj:IsA("IntValue")) then
+        local maxObj = char:FindFirstChild("MaxHealth") or char:FindFirstChild("MaxHP")
+        local maxVal = (maxObj and (maxObj:IsA("NumberValue") or maxObj:IsA("IntValue"))) and maxObj.Value or 100
+        return hpObj.Value, math.max(maxVal, 1)
+    end
+
+    return 100, 100
+end
+
+local IgnoredAncestorNames = {
+    ["corpses"] = true, ["ragdolls"] = true, ["dead"] = true, ["debris"] = true,
+    ["viewmodel"] = true, ["camera"] = true, ["ignore"] = true, ["effects"] = true,
+    ["weapons"] = true, ["dropped"] = true, ["items"] = true, ["shop"] = true
+}
+
+local function HasValidAncestorPath(model)
+    local curr = model.Parent
+    while curr and curr ~= workspace do
+        if curr == LocalPlayer.Character or curr == Camera then
+            return false
+        end
+        local lowerName = string.lower(curr.Name)
+        if IgnoredAncestorNames[lowerName] then
+            return false
+        end
+        if curr:IsA("Model") and curr:FindFirstChildOfClass("Humanoid") then
+            return false
+        end
+        curr = curr.Parent
+    end
+    return curr == workspace
+end
+
+local function IsValidBotModel(model)
+    if not model or not model:IsA("Model") or model == LocalPlayer.Character then return false end
+    if Players:GetPlayerFromCharacter(model) then return false end
+    if not HasValidAncestorPath(model) then return false end
+
+    local hum = GetCharacterHumanoid(model)
+    local animCtrl = model:FindFirstChildOfClass("AnimationController")
+    local hasHealthData = (model:GetAttribute("Health") ~= nil) or (model:GetAttribute("HP") ~= nil) or (model:FindFirstChild("Health") ~= nil)
+    local hasStandardRig = (model:FindFirstChild("Head") ~= nil) and (
+        model:FindFirstChild("HumanoidRootPart") ~= nil or
+        model:FindFirstChild("Torso") ~= nil or
+        model:FindFirstChild("UpperTorso") ~= nil
+    )
+
+    if not (hum or animCtrl or hasHealthData or hasStandardRig) then
+        return false
+    end
+
+    return GetCharacterRoot(model) ~= nil
+end
+
+local function IsAliveAndValid(char)
+    if not char or not char.Parent or char == LocalPlayer.Character then return false end
+    if not workspace:IsAncestorOf(char) then return false end
+    if QuantumConfig.IgnoreForceField and char:FindFirstChildOfClass("ForceField") then
+        return false
+    end
+
+    local root = GetCharacterRoot(char)
+    local head = GetCharacterHead(char)
+    if not root or not head then return false end
+    
+    local hum = GetCharacterHumanoid(char)
+    if hum then
+        if hum:GetState() == Enum.HumanoidStateType.Dead then return false end
+        return hum.Health > 0 or hum.MaxHealth == 0
+    end
+
+    local hp, _ = GetEntityHealthAndMax(char)
+    return hp > 0
+end
+
+local function CheckTeam(entityData)
+    if not QuantumConfig.TeamCheck then return true end
+    if not entityData then return true end
+
+    local player = entityData.Player
+    if player and LocalPlayer.Team ~= nil and player.Team ~= nil then
+        return player.Team ~= LocalPlayer.Team
+    end
+
+    local model = entityData.Model
+    if model and LocalPlayer.Team ~= nil then
+        local myTeamName = string.lower(LocalPlayer.Team.Name)
+
+        local teamVal = model:FindFirstChild("Team") or model:FindFirstChild("TeamColor") or model:FindFirstChild("Faction")
+        if teamVal and teamVal:IsA("ValueBase") then
+            if teamVal.Value == LocalPlayer.Team or teamVal.Value == LocalPlayer.TeamColor or tostring(teamVal.Value):lower() == myTeamName then
+                return false
+            end
+        end
+
+        local attrTeam = model:GetAttribute("Team") or model:GetAttribute("TeamColor") or model:GetAttribute("Faction")
+        if attrTeam and (tostring(attrTeam):lower() == myTeamName or attrTeam == LocalPlayer.TeamColor) then
+            return false
+        end
+
+        local parentFolder = model.Parent
+        if parentFolder and parentFolder ~= workspace then
+            local pName = string.lower(parentFolder.Name)
+            if pName == myTeamName or pName == string.lower(LocalPlayer.TeamColor.Name) then
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
+local function IsVisible(targetPart, targetChar)
+    if not targetPart then return false end
+    local origin = Camera.CFrame.Position
+    local displacement = targetPart.Position - origin
+    local distance = displacement.Magnitude
+    if distance < 1 then return true end
+
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = {LocalPlayer.Character, Camera}
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+    raycastParams.IgnoreWater = true
+
+    local result = workspace:Raycast(origin, displacement.Unit * distance, raycastParams)
+    return result == nil or (targetChar and targetChar:IsAncestorOf(result.Instance))
+end
+
+local function EvaluateInstanceForBot(inst)
+    if not inst then return end
+    local candidateModel = nil
+    if inst:IsA("Humanoid") or inst:IsA("AnimationController") then
+        candidateModel = inst.Parent
+    elseif inst:IsA("BasePart") and (inst.Name == "HumanoidRootPart" or inst.Name == "Head") then
+        candidateModel = inst.Parent
+    elseif inst:IsA("Model") then
+        candidateModel = inst
+    end
+
+    if candidateModel and candidateModel:IsA("Model") and not DiscoveredBotModels[candidateModel] then
+        if IsValidBotModel(candidateModel) then
+            DiscoveredBotModels[candidateModel] = true
+        end
+    end
+end
+
+TrackConnection(workspace.DescendantAdded:Connect(function(desc)
+    if IsUnloaded or not QuantumConfig.IncludeBots then return end
+    if desc:IsA("Humanoid") or desc:IsA("AnimationController") or (desc:IsA("BasePart") and (desc.Name == "HumanoidRootPart" or desc.Name == "Head")) then
+        task.defer(function()
+            pcall(EvaluateInstanceForBot, desc)
+        end)
+    end
+end))
+
+task.spawn(function()
+    while not IsUnloaded do
+        if QuantumConfig.IncludeBots then
+            pcall(function()
+                local descendants = workspace:GetDescendants()
+                for i = 1, #descendants do
+                    if IsUnloaded or not QuantumConfig.IncludeBots then break end
+                    local inst = descendants[i]
+                    if inst:IsA("Humanoid") or inst:IsA("AnimationController") or (inst:IsA("BasePart") and inst.Name == "HumanoidRootPart") then
+                        EvaluateInstanceForBot(inst)
+                    end
+                    if i % 300 == 0 then
+                        task.wait()
+                    end
+                end
+            end)
+        end
+        task.wait(2.5)
+    end
+end)
+
+local HitboxTargetNames = {"HumanoidRootPart", "Head", "Torso", "UpperTorso"}
+
+local function RestoreCharacterHitboxes(char)
+    if not char then return end
+    for _, partName in ipairs(HitboxTargetNames) do
+        local part = char:FindFirstChild(partName)
+        if part and OriginalPartProperties[part] then
+            local orig = OriginalPartProperties[part]
+            pcall(function()
+                part.Size = orig.Size
+                part.Transparency = orig.Transparency
+                part.Material = orig.Material
+                part.Color = orig.Color
+                part.CanCollide = orig.CanCollide
+                part.Massless = orig.Massless
+            end)
+            OriginalPartProperties[part] = nil
+        end
+    end
+end
+
+local function UpdateCharacterHitbox(char, shouldExpand, activeColor)
+    if not char then return end
+    if not shouldExpand then
+        RestoreCharacterHitboxes(char)
+        return
+    end
+
+    local desiredName = QuantumConfig.HitboxPart
+    local targetPart = char:FindFirstChild(desiredName)
+    if desiredName == "Torso" and not targetPart then
+        targetPart = char:FindFirstChild("UpperTorso") or GetCharacterRoot(char)
+    end
+    if not targetPart then
+        targetPart = GetCharacterRoot(char) or GetCharacterHead(char)
+    end
+
+    for _, partName in ipairs(HitboxTargetNames) do
+        local p = char:FindFirstChild(partName)
+        if p and p ~= targetPart and OriginalPartProperties[p] then
+            local orig = OriginalPartProperties[p]
+            pcall(function()
+                p.Size = orig.Size
+                p.Transparency = orig.Transparency
+                p.Material = orig.Material
+                p.Color = orig.Color
+                p.CanCollide = orig.CanCollide
+                p.Massless = orig.Massless
+            end)
+            OriginalPartProperties[p] = nil
+        end
+    end
+
+    if targetPart and targetPart:IsA("BasePart") then
+        if not OriginalPartProperties[targetPart] then
+            OriginalPartProperties[targetPart] = {
+                Size = targetPart.Size,
+                Transparency = targetPart.Transparency,
+                Material = targetPart.Material,
+                Color = targetPart.Color,
+                CanCollide = targetPart.CanCollide,
+                Massless = targetPart.Massless
+            }
+        end
+        local s = QuantumConfig.HitboxSize
+        targetPart.Size = Vector3.new(s, s, s)
+        targetPart.Transparency = QuantumConfig.HitboxTransparency
+        targetPart.Material = Enum.Material.ForceField
+        targetPart.Color = activeColor or QuantumConfig.ESP_Color
+        targetPart.CanCollide = false
+        targetPart.Massless = true
+    end
+end
+
+local R15Skeleton = {
+    {"Head", "UpperTorso"},
+    {"UpperTorso", "LowerTorso"},
+    {"UpperTorso", "LeftUpperArm"},
+    {"LeftUpperArm", "LeftLowerArm"},
+    {"LeftLowerArm", "LeftHand"},
+    {"UpperTorso", "RightUpperArm"},
+    {"RightUpperArm", "RightLowerArm"},
+    {"RightLowerArm", "RightHand"},
+    {"LowerTorso", "LeftUpperLeg"},
+    {"LeftUpperLeg", "LeftLowerLeg"},
+    {"LeftLowerLeg", "LeftFoot"},
+    {"LowerTorso", "RightUpperLeg"},
+    {"RightUpperLeg", "RightLowerLeg"},
+    {"RightLowerLeg", "RightFoot"}
+}
+
+local function GetR6SkeletonPoints(char)
+    local head = char:FindFirstChild("Head")
+    local torso = char:FindFirstChild("Torso")
+    local lArm = char:FindFirstChild("Left Arm")
+    local rArm = char:FindFirstChild("Right Arm")
+    local lLeg = char:FindFirstChild("Left Leg")
+    local rLeg = char:FindFirstChild("Right Leg")
+    if not (head and torso) then return {} end
+
+    local neck = (torso.CFrame * CFrame.new(0, 1, 0)).Position
+    local pelvis = (torso.CFrame * CFrame.new(0, -1, 0)).Position
+    local joints = {
+        {head.Position, neck},
+        {neck, pelvis}
+    }
+
+    if lArm then
+        local lShoulder = (torso.CFrame * CFrame.new(-1.5, 0.8, 0)).Position
+        local lHand = (lArm.CFrame * CFrame.new(0, -0.8, 0)).Position
+        table.insert(joints, {neck, lShoulder})
+        table.insert(joints, {lShoulder, lHand})
+    end
+    if rArm then
+        local rShoulder = (torso.CFrame * CFrame.new(1.5, 0.8, 0)).Position
+        local rHand = (rArm.CFrame * CFrame.new(0, -0.8, 0)).Position
+        table.insert(joints, {neck, rShoulder})
+        table.insert(joints, {rShoulder, rHand})
+    end
+    if lLeg then
+        local lHip = (torso.CFrame * CFrame.new(-0.5, -1, 0)).Position
+        local lFoot = (lLeg.CFrame * CFrame.new(0, -0.8, 0)).Position
+        table.insert(joints, {pelvis, lHip})
+        table.insert(joints, {lHip, lFoot})
+    end
+    if rLeg then
+        local rHip = (torso.CFrame * CFrame.new(0.5, -1, 0)).Position
+        local rFoot = (rLeg.CFrame * CFrame.new(0, -0.8, 0)).Position
+        table.insert(joints, {pelvis, rHip})
+        table.insert(joints, {rHip, rFoot})
+    end
+
+    return joints
+end
+
+local function CreateESPData(model)
+    if ESP_Objects[model] then return ESP_Objects[model] end
+    local esp = { 
+        Name = Drawing.new("Text"), 
+        Tracer = Drawing.new("Line"),
+        Box = Drawing.new("Square"),
+        HeadDot = Drawing.new("Circle"),
+        HealthBG = Drawing.new("Line"),
+        HealthBar = Drawing.new("Line"),
+        Bones = {}
+    }
+    esp.Name.Size = 14 
+    esp.Name.Center = true 
+    esp.Name.Outline = true
+    esp.Name.OutlineColor = Color3.fromRGB(0, 0, 0)
+    esp.Name.Color = QuantumConfig.ESP_Color
+    esp.Name.Transparency = 1
+    esp.Name.Visible = false
+
+    esp.Tracer.Thickness = 1.6
+    esp.Tracer.Color = QuantumConfig.ESP_Color
+    esp.Tracer.Transparency = 1
+    esp.Tracer.Visible = false
+
+    esp.Box.Thickness = 1.8
+    esp.Box.Filled = false
+    esp.Box.Color = QuantumConfig.ESP_Color
+    esp.Box.Transparency = 1
+    esp.Box.Visible = false
+
+    esp.HeadDot.Thickness = 1.5
+    esp.HeadDot.NumSides = 20
+    esp.HeadDot.Filled = false
+    esp.HeadDot.Color = QuantumConfig.ESP_Color
+    esp.HeadDot.Transparency = 1
+    esp.HeadDot.Visible = false
+
+    esp.HealthBG.Thickness = 4
+    esp.HealthBG.Color = Color3.fromRGB(15, 15, 15)
+    esp.HealthBG.Transparency = 1
+    esp.HealthBG.Visible = false
+
+    esp.HealthBar.Thickness = 2
+    esp.HealthBar.Transparency = 1
+    esp.HealthBar.Visible = false
+    
+    for i = 1, #R15Skeleton do
+        local line = Drawing.new("Line") 
+        line.Thickness = 1.8
+        line.Color = QuantumConfig.ESP_Color
+        line.Transparency = 1
+        line.Visible = false
+        table.insert(esp.Bones, line)
+    end
+    ESP_Objects[model] = esp
+    return esp
+end
+
+local function HideESP(esp)
+    if not esp then return end
+    esp.Box.Visible = false
+    esp.Name.Visible = false
+    esp.Tracer.Visible = false
+    esp.HeadDot.Visible = false
+    esp.HealthBG.Visible = false
+    esp.HealthBar.Visible = false
+    for i = 1, #esp.Bones do
+        esp.Bones[i].Visible = false
+    end
+end
+
+local function RemoveESPData(model)
+    local esp = ESP_Objects[model]
+    if esp then
+        pcall(function()
+            esp.Name:Remove() 
+            esp.Tracer:Remove()
+            esp.Box:Remove()
+            esp.HeadDot:Remove()
+            esp.HealthBG:Remove()
+            esp.HealthBar:Remove()
+            for _, l in ipairs(esp.Bones) do l:Remove() end
+        end)
+        ESP_Objects[model] = nil
+    end
+end
+
+local function RefreshActiveEntities()
+    local seenModels = {}
+    local playerCount = 0
+    local botCount = 0
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and IsAliveAndValid(player.Character) then
+            local char = player.Character
+            seenModels[char] = true
+            playerCount = playerCount + 1
+            ActiveEntities[char] = {
+                Model = char,
+                Player = player,
+                IsBot = false,
+                Name = player.DisplayName or player.Name
+            }
+        end
+    end
+
+    if QuantumConfig.IncludeBots then
+        for botModel, _ in pairs(DiscoveredBotModels) do
+            if not botModel or not botModel.Parent then
+                DiscoveredBotModels[botModel] = nil
+            elseif not seenModels[botModel] and botModel ~= LocalPlayer.Character then
+                local ownerPlayer = Players:GetPlayerFromCharacter(botModel)
+                if not ownerPlayer and IsAliveAndValid(botModel) then
+                    seenModels[botModel] = true
+                    botCount = botCount + 1
+                    local hum = GetCharacterHumanoid(botModel)
+                    local displayName = (hum and hum.DisplayName ~= "" and hum.DisplayName) or botModel.Name
+                    ActiveEntities[botModel] = {
+                        Model = botModel,
+                        Player = nil,
+                        IsBot = true,
+                        Name = displayName
+                    }
+                end
+            end
+        end
+    end
+
+    for model, _ in pairs(ActiveEntities) do
+        if not seenModels[model] or not IsAliveAndValid(model) then
+            RestoreCharacterHitboxes(model)
+            local hl = model and model:FindFirstChild("QuantumChams")
+            if hl then hl.Enabled = false end
+            RemoveESPData(model)
+            ActiveEntities[model] = nil
+        end
+    end
+
+    EntitiesLabel.Text = string.format("Players: %d | Bots: %d", playerCount, botCount)
+end
+
+task.spawn(function()
+    while not IsUnloaded do
+        pcall(RefreshActiveEntities)
+        task.wait(0.25)
+    end
+end)
+
+local function GetTargetPart(char)
+    if not IsAliveAndValid(char) then return nil end
+    local mode = QuantumConfig.SilentAimPart
+    if mode == "Random" then
+        local validParts = {}
+        for _, p in ipairs(char:GetChildren()) do
+            if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then
+                table.insert(validParts, p)
+            end
+        end
+        if #validParts > 0 then
+            return validParts[math.random(1, #validParts)]
+        end
+        return GetCharacterHead(char) or GetCharacterRoot(char)
+    elseif mode == "Closest" then
+        local closestPart = nil
+        local shortestDist = math.huge
+        local mousePos = UserInputService:GetMouseLocation()
+        for _, p in ipairs(char:GetChildren()) do
+            if p:IsA("BasePart") then
+                local pt, onScreen = Camera:WorldToViewportPoint(p.Position)
+                if onScreen then
+                    local dist = (Vector2.new(pt.X, pt.Y) - mousePos).Magnitude
+                    if dist < shortestDist then
+                        shortestDist = dist
+                        closestPart = p
+                    end
+                end
+            end
+        end
+        return closestPart or GetCharacterHead(char) or GetCharacterRoot(char)
+    else
+        return char:FindFirstChild(mode) or GetCharacterHead(char) or GetCharacterRoot(char)
+    end
+end
+
+local function GetPredictedPosition(targetPart)
+    if not targetPart then return Vector3.new(0, 0, 0) end
+    if not QuantumConfig.Prediction then return targetPart.Position end
+    local vel = targetPart.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
+    return targetPart.Position + (vel * QuantumConfig.PredictionAmount)
+end
+
+local function FindEntityFromDescendant(inst)
+    if not inst then return nil end
+    for model, entityData in pairs(ActiveEntities) do
+        if model == inst or model:IsAncestorOf(inst) then
+            return entityData
+        end
+    end
+    return nil
+end
+
+local function IsAimbotKeyDown()
+    local key = QuantumConfig.AimbotKey
+    if typeof(key) == "EnumItem" then
+        if key.EnumType == Enum.UserInputType then
+            return UserInputService:IsMouseButtonPressed(key)
+        elseif key.EnumType == Enum.KeyCode then
+            return UserInputService:IsKeyDown(key)
+        end
+    end
+    return false
+end
+
+local function GetTriggerBotTarget(mousePos)
+    if QuantumConfig.TriggerWithSilentAim and QuantumConfig.SilentAim and CachedBestTarget and IsAliveAndValid(CachedBestTarget) then
+        local ent = ActiveEntities[CachedBestTarget]
+        if ent and CheckTeam(ent) and (not ent.IsBot or QuantumConfig.IncludeBots) then
+            return ent
+        end
+    end
+
+    if Mouse.Target then
+        local ent = FindEntityFromDescendant(Mouse.Target)
+        if ent and IsAliveAndValid(ent.Model) and CheckTeam(ent) and (not ent.IsBot or QuantumConfig.IncludeBots) then
+            return ent
+        end
+    end
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {LocalPlayer.Character, Camera}
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.IgnoreWater = true
+
+    local unitRay = Camera:ViewportPointToRay(mousePos.X, mousePos.Y)
+    local rayResult = workspace:Raycast(unitRay.Origin, unitRay.Direction * 2500, rayParams)
+    if rayResult and rayResult.Instance then
+        local ent = FindEntityFromDescendant(rayResult.Instance)
+        if ent and IsAliveAndValid(ent.Model) and CheckTeam(ent) and (not ent.IsBot or QuantumConfig.IncludeBots) then
+            return ent
+        end
+    end
+
+    local camResult = workspace:Raycast(Camera.CFrame.Position, Camera.CFrame.LookVector * 2500, rayParams)
+    if camResult and camResult.Instance then
+        local ent = FindEntityFromDescendant(camResult.Instance)
+        if ent and IsAliveAndValid(ent.Model) and CheckTeam(ent) and (not ent.IsBot or QuantumConfig.IncludeBots) then
+            return ent
+        end
+    end
+
+    for model, ent in pairs(ActiveEntities) do
+        if IsAliveAndValid(model) and CheckTeam(ent) and (not ent.IsBot or QuantumConfig.IncludeBots) then
+            local head = GetCharacterHead(model)
+            local hrp = GetCharacterRoot(model)
+            if head and hrp then
+                local hPos, hVis = Camera:WorldToViewportPoint(head.Position)
+                local rPos, rVis = Camera:WorldToViewportPoint(hrp.Position)
+                if hVis and rVis then
+                    local height = math.abs(rPos.Y - hPos.Y) * 2.1
+                    local width = math.max(height * 0.55, 18)
+                    local centerX, centerY = rPos.X, (hPos.Y + rPos.Y) / 2
+                    if math.abs(mousePos.X - centerX) <= width / 2 and math.abs(mousePos.Y - centerY) <= height / 2 then
+                        if not QuantumConfig.WallCheck or IsVisible(head, model) or IsVisible(hrp, model) then
+                            return ent
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function ExecuteTriggerShot(mousePos)
+    if IsFiringTrigger then return end
+    if QuantumConfig.MenuOpen and MainFrame.Visible then
+        local mPos = MainFrame.AbsolutePosition
+        local mSize = MainFrame.AbsoluteSize
+        if mousePos.X >= mPos.X and mousePos.X <= mPos.X + mSize.X and mousePos.Y >= mPos.Y and mousePos.Y <= mPos.Y + mSize.Y then
+            return
+        end
+    end
+
+    IsFiringTrigger = true
+    task.spawn(function()
+        local fired = false
+
+        if type(mouse1press) == "function" and type(mouse1release) == "function" then
+            pcall(mouse1press)
+            task.wait(0.03)
+            pcall(mouse1release)
+            fired = true
+        elseif type(mouse1click) == "function" then
+            pcall(mouse1click)
+            fired = true
+        end
+
+        if not fired and VirtualInputManager then
+            pcall(function()
+                VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, true, game, 1)
+                task.wait(0.03)
+                VirtualInputManager:SendMouseButtonEvent(mousePos.X, mousePos.Y, 0, false, game, 1)
+                fired = true
+            end)
+        end
+
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        if tool then
+            pcall(function() tool:Activate() end)
+        end
+
+        IsFiringTrigger = false
+    end)
+end
+
+TrackConnection(UserInputService.JumpRequest:Connect(function()
+    if not IsUnloaded and QuantumConfig.InfiniteJump then
+        local char = LocalPlayer.Character
+        local hum = char and GetCharacterHumanoid(char)
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+    end
+end))
+
+TrackConnection(RunService.Stepped:Connect(function()
+    if IsUnloaded then return end
+    if QuantumConfig.Noclip then
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and part.CanCollide then
+                    if LocalPlayerNoclipCache[part] == nil then
+                        LocalPlayerNoclipCache[part] = true
+                    end
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+end))
+
+-----------------------------------
+-- 9. MAIN RENDERSTEPPED LOOP
+-----------------------------------
+local lastUpdate = tick()
+local lastFrameTime = tick()
+local lastTrigger = 0
+local frames = 0
+
+TrackConnection(RunService.RenderStepped:Connect(function()
+    if IsUnloaded then return end
+    pcall(function()
+        local mousePos = UserInputService:GetMouseLocation()
+        local currentTime = tick()
+        local dt = math.clamp(currentTime - lastFrameTime, 0.001, 0.2)
+        lastFrameTime = currentTime
+        frames = frames + 1
+        
+        if currentTime - lastUpdate >= 0.5 then
+            FPSLabel.Text = "FPS: " .. math.floor(frames / (currentTime - lastUpdate))
+            local ok, result = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValueString() end)
+            PingLabel.Text = "Ping: " .. (ok and result or "N/A")
+            frames = 0
+            lastUpdate = currentTime
+        end
+        
+        if QuantumConfig.ShowFOV then
+            FOVCircle.Visible = true 
+            FOVCircle.Radius = QuantumConfig.FOVRadius 
+            FOVCircle.Position = mousePos 
+            FOVCircle.Color = Themes[QuantumConfig.Theme]
+            FOVCircle.Filled = QuantumConfig.FilledFOV
+            FOVCircle.Transparency = QuantumConfig.FilledFOV and 0.18 or 1
+        else
+            FOVCircle.Visible = false
+        end
+
+        if QuantumConfig.CustomCameraFOV then
+            Camera.FieldOfView = QuantumConfig.CameraFOV
+        end
+
+        local lChar = LocalPlayer.Character
+        local lHum = lChar and GetCharacterHumanoid(lChar)
+        local lRoot = lChar and GetCharacterRoot(lChar)
+        if lHum then
+            if QuantumConfig.CustomWalkSpeed then
+                lHum.WalkSpeed = QuantumConfig.WalkSpeed
+            end
+            if QuantumConfig.CustomJumpPower then
+                lHum.UseJumpPower = true
+                lHum.JumpPower = QuantumConfig.JumpPower
+            end
+        end
+
+        if lRoot then
+            if QuantumConfig.SpinBot then
+                lRoot.CFrame = lRoot.CFrame * CFrame.Angles(0, math.rad(QuantumConfig.SpinSpeed), 0)
+            end
+
+            if QuantumConfig.Fly and not UserInputService:GetFocusedTextBox() then
+                local moveDir = Vector3.zero
+                local camCF = Camera.CFrame
+                if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + camCF.LookVector end
+                if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - camCF.LookVector end
+                if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - camCF.RightVector end
+                if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + camCF.RightVector end
+                if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDir = moveDir + Vector3.new(0, 1, 0) end
+                if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+                    moveDir = moveDir - Vector3.new(0, 1, 0)
+                end
+                lRoot.AssemblyLinearVelocity = Vector3.zero
+                if moveDir.Magnitude > 0 then
+                    lRoot.CFrame = lRoot.CFrame + (moveDir.Unit * QuantumConfig.FlySpeed * dt)
+                end
+            end
+        end
+
+        local activeESPColor = QuantumConfig.RainbowESP
+            and Color3.fromHSV((currentTime * 0.22) % 1, 0.9, 1)
+            or (QuantumConfig.ESP_Color or Color3.fromRGB(255, 45, 85))
+
+        local tracerStartPos = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+        if QuantumConfig.TracerOrigin == "Center" then
+            tracerStartPos = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+        elseif QuantumConfig.TracerOrigin == "Mouse" then
+            tracerStartPos = mousePos
+        end
+
+        local closestTarget = nil
+        local shortestDistance = QuantumConfig.FOVRadius
+        local closestBehindWall = nil
+        local shortestBehindWallDist = QuantumConfig.FOVRadius
+
+        for model, entityData in pairs(ActiveEntities) do
+            local esp = CreateESPData(model)
+
+            if IsAliveAndValid(model) and CheckTeam(entityData) and (not entityData.IsBot or QuantumConfig.IncludeBots) then
+                local hrp = GetCharacterRoot(model)
+                local head = GetCharacterHead(model)
+
+                if hrp and head then
+                    UpdateCharacterHitbox(model, QuantumConfig.HitboxExpander, activeESPColor)
+
+                    if QuantumConfig.ChamsESP then
+                        local hl = model:FindFirstChild("QuantumChams")
+                        if not hl then 
+                            hl = Instance.new("Highlight") 
+                            hl.Name = "QuantumChams" 
+                            hl.Parent = model 
+                        end
+                        hl.FillColor = activeESPColor
+                        hl.OutlineColor = activeESPColor
+                        hl.FillTransparency = 0.5
+                        hl.OutlineTransparency = 0.1
+                        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                        hl.Enabled = true
+                    else
+                        local hl = model:FindFirstChild("QuantumChams")
+                        if hl then hl.Enabled = false end
+                    end
+
+                    local aimPart = model:FindFirstChild(QuantumConfig.TargetPart) or head or hrp
+                    local aimScreenPos, aimOnScreen = Camera:WorldToViewportPoint(aimPart.Position)
+                    if aimOnScreen then
+                        local cursorDist = (Vector2.new(aimScreenPos.X, aimScreenPos.Y) - mousePos).Magnitude
+                        if cursorDist <= QuantumConfig.FOVRadius then
+                            local needVisCheck = QuantumConfig.WallCheck or QuantumConfig.PrioritizeBehindWalls
+                            local visible = (not needVisCheck) or IsVisible(aimPart, model)
+
+                            if QuantumConfig.PrioritizeBehindWalls then
+                                if not visible and cursorDist < shortestBehindWallDist then
+                                    closestBehindWall = model
+                                    shortestBehindWallDist = cursorDist
+                                elseif visible and cursorDist < shortestDistance then
+                                    closestTarget = model
+                                    shortestDistance = cursorDist
+                                end
+                            else
+                                if (not QuantumConfig.WallCheck or visible) and cursorDist < shortestDistance then
+                                    closestTarget = model
+                                    shortestDistance = cursorDist
+                                end
+                            end
+                        end
+                    end
+
+                    local vector, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+                    local distance = (Camera.CFrame.Position - hrp.Position).Magnitude
+
+                    if onScreen and distance <= QuantumConfig.MaxDistance then
+                        local headScreen, headVis = Camera:WorldToViewportPoint(head.Position)
+                        local topScreen = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.75, 0))
+                        local botScreen = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3.0, 0))
+                        
+                        local boxHeight = math.max(math.abs(botScreen.Y - topScreen.Y), 6)
+                        local boxWidth = boxHeight * 0.6
+                        local boxPos = Vector2.new(vector.X - boxWidth / 2, topScreen.Y)
+                        local boxSize = Vector2.new(boxWidth, boxHeight)
+
+                        if QuantumConfig.BoxESP then
+                            esp.Box.Size = boxSize
+                            esp.Box.Position = boxPos
+                            esp.Box.Color = activeESPColor
+                            esp.Box.Visible = true
+                        else
+                            esp.Box.Visible = false
+                        end
+
+                        if QuantumConfig.HeadDotESP and headVis then
+                            esp.HeadDot.Position = Vector2.new(headScreen.X, headScreen.Y)
+                            esp.HeadDot.Radius = math.clamp(boxWidth * 0.18, 2.5, 10)
+                            esp.HeadDot.Color = activeESPColor
+                            esp.HeadDot.Visible = true
+                        else
+                            esp.HeadDot.Visible = false
+                        end
+
+                        local curHp, maxHp = GetEntityHealthAndMax(model)
+                        if QuantumConfig.HealthESP and maxHp > 0 then
+                            local hpRatio = math.clamp(curHp / maxHp, 0, 1)
+                            local barX = boxPos.X - 5
+                            local barTopY = boxPos.Y
+                            local barBotY = boxPos.Y + boxHeight
+                            local fillTopY = barBotY - (boxHeight * hpRatio)
+
+                            esp.HealthBG.From = Vector2.new(barX, barTopY - 1)
+                            esp.HealthBG.To = Vector2.new(barX, barBotY + 1)
+                            esp.HealthBG.Visible = true
+
+                            esp.HealthBar.From = Vector2.new(barX, barBotY)
+                            esp.HealthBar.To = Vector2.new(barX, fillTopY)
+                            esp.HealthBar.Color = Color3.fromHSV(hpRatio * 0.33, 0.9, 1)
+                            esp.HealthBar.Visible = true
+                        else
+                            esp.HealthBG.Visible = false
+                            esp.HealthBar.Visible = false
+                        end
+                        
+                        if QuantumConfig.NameESP then
+                            local prefix = entityData.IsBot and "[AI/BOT] " or ""
+                            esp.Name.Position = Vector2.new(vector.X, topScreen.Y - 17)
+                            esp.Name.Text = string.format("%s%s [%dm]", prefix, entityData.Name, math.floor(distance))
+                            esp.Name.Color = activeESPColor
+                            esp.Name.Visible = true
+                        else 
+                            esp.Name.Visible = false 
+                        end
+                        
+                        if QuantumConfig.Tracers then
+                            esp.Tracer.From = tracerStartPos
+                            esp.Tracer.To = Vector2.new(vector.X, botScreen.Y)
+                            esp.Tracer.Color = activeESPColor
+                            esp.Tracer.Visible = true
+                        else 
+                            esp.Tracer.Visible = false 
+                        end
+                        
+                        if QuantumConfig.SkeletonESP then
+                            if model:FindFirstChild("UpperTorso") then
+                                for i = 1, #R15Skeleton do
+                                    local conn = R15Skeleton[i]
+                                    local part1, part2 = model:FindFirstChild(conn[1]), model:FindFirstChild(conn[2])
+                                    if part1 and part2 then
+                                        local pos1, vis1 = Camera:WorldToViewportPoint(part1.Position)
+                                        local pos2, vis2 = Camera:WorldToViewportPoint(part2.Position)
+                                        if vis1 and vis2 then
+                                            esp.Bones[i].From = Vector2.new(pos1.X, pos1.Y)
+                                            esp.Bones[i].To = Vector2.new(pos2.X, pos2.Y)
+                                            esp.Bones[i].Color = activeESPColor
+                                            esp.Bones[i].Visible = true
+                                        else
+                                            esp.Bones[i].Visible = false
+                                        end
+                                    else
+                                        esp.Bones[i].Visible = false
+                                    end
+                                end
+                            else
+                                local r6Joints = GetR6SkeletonPoints(model)
+                                for i = 1, #R15Skeleton do
+                                    local joint = r6Joints[i]
+                                    if joint then
+                                        local pos1, vis1 = Camera:WorldToViewportPoint(joint[1])
+                                        local pos2, vis2 = Camera:WorldToViewportPoint(joint[2])
+                                        if vis1 and vis2 then
+                                            esp.Bones[i].From = Vector2.new(pos1.X, pos1.Y)
+                                            esp.Bones[i].To = Vector2.new(pos2.X, pos2.Y)
+                                            esp.Bones[i].Color = activeESPColor
+                                            esp.Bones[i].Visible = true
+                                        else
+                                            esp.Bones[i].Visible = false
+                                        end
+                                    else
+                                        esp.Bones[i].Visible = false
+                                    end
+                                end
+                            end
+                        else
+                            for i = 1, #esp.Bones do
+                                esp.Bones[i].Visible = false
+                            end
+                        end
+                    else
+                        HideESP(esp)
+                    end
+                else
+                    HideESP(esp)
+                end
+            else
+                RestoreCharacterHitboxes(model)
+                local hl = model and model:FindFirstChild("QuantumChams")
+                if hl then hl.Enabled = false end
+                HideESP(esp)
+            end
+        end
+
+        if QuantumConfig.PrioritizeBehindWalls and closestBehindWall then
+            CachedBestTarget = closestBehindWall
+        else
+            CachedBestTarget = closestTarget
+        end
+
+        if CachedBestTarget and IsAliveAndValid(CachedBestTarget) then
+            local ent = ActiveEntities[CachedBestTarget]
+            local tag = (ent and ent.IsBot) and "[BOT] " or ""
+            TargetStatusLabel.Text = "Locked: " .. tag .. (ent and ent.Name or CachedBestTarget.Name)
+            local tPart = GetTargetPart(CachedBestTarget)
+            if QuantumConfig.ShowTargetLine and (QuantumConfig.Aimbot or QuantumConfig.SilentAim) and tPart then
+                local tScreen, tVis = Camera:WorldToViewportPoint(GetPredictedPosition(tPart))
+                if tVis then
+                    local tVec = Vector2.new(tScreen.X, tScreen.Y)
+                    TargetSnapLine.From = mousePos
+                    TargetSnapLine.To = tVec
+                    TargetSnapLine.Color = Themes[QuantumConfig.Theme]
+                    TargetSnapLine.Visible = true
+
+                    TargetLockRing.Position = tVec
+                    TargetLockRing.Color = Themes[QuantumConfig.Theme]
+                    TargetLockRing.Visible = true
+                else
+                    TargetSnapLine.Visible = false
+                    TargetLockRing.Visible = false
+                end
+            else
+                TargetSnapLine.Visible = false
+                TargetLockRing.Visible = false
+            end
+        else
+            TargetStatusLabel.Text = "Locked: None"
+            TargetSnapLine.Visible = false
+            TargetLockRing.Visible = false
+        end
+
+        if QuantumConfig.Aimbot and IsAimbotKeyDown() then
+            local targetChar = CachedBestTarget
+            if targetChar and IsAliveAndValid(targetChar) then
+                local targetPart = targetChar:FindFirstChild(QuantumConfig.TargetPart) or GetCharacterHead(targetChar)
+                if targetPart then
+                    local aimPos = GetPredictedPosition(targetPart)
+                    local cameraCFrame = Camera.CFrame
+                    local newLookVector = (aimPos - cameraCFrame.Position).Unit
+                    local targetCFrame = CFrame.new(cameraCFrame.Position, cameraCFrame.Position + newLookVector)
+                    Camera.CFrame = cameraCFrame:Lerp(targetCFrame, math.clamp(QuantumConfig.Smoothness / 100, 0.01, 1))
+                end
+            end
+        end
+
+        if (QuantumConfig.TriggerBot or QuantumConfig.TriggerWithSilentAim) and (currentTime - lastTrigger >= QuantumConfig.TriggerDelay) then
+            local hitEntity = GetTriggerBotTarget(mousePos)
+            if hitEntity then
+                lastTrigger = currentTime
+                ExecuteTriggerShot(mousePos)
+            end
+        end
+    end)
+end))
+
+-----------------------------------
+-- 10. UNIVERSAL SILENT AIM HOOKS
+-----------------------------------
+local function DeepReplace(tbl, targetPos, targetCF, targetInst, depth)
+    depth = (depth or 0) + 1
+    if depth > 4 then return end
+    for k, v in pairs(tbl) do
+        if typeof(v) == "Vector3" then
+            tbl[k] = targetPos
+        elseif typeof(v) == "CFrame" then
+            tbl[k] = targetCF
+        elseif typeof(v) == "Instance" and v:IsA("BasePart") then
+            tbl[k] = targetInst
+        elseif type(v) == "table" then
+            DeepReplace(v, targetPos, targetCF, targetInst, depth)
+        end
+    end
+end
+
+if hookmetamethod and getnamecallmethod and checkcaller then
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+        local args = {...}
+        
+        if not IsUnloaded and QuantumConfig.SilentAim and not checkcaller() then
+            if math.random(1, 100) <= QuantumConfig.HitChance then
+                local targetChar = CachedBestTarget
+                if targetChar and IsAliveAndValid(targetChar) then
+                    local targetPart = GetTargetPart(targetChar)
+                    if targetPart then
+                        local hitPos = GetPredictedPosition(targetPart)
+                        local hitCF = CFrame.new(hitPos)
+                        
+                        if method == "Raycast" or method == "Spherecast" or method == "Blockcast" then
+                            if typeof(args[1]) == "Vector3" and typeof(args[2]) == "Vector3" then
+                                local origMag = math.max(args[2].Magnitude, 1000)
+                                args[2] = (hitPos - args[1]).Unit * origMag
+                                return oldNamecall(self, unpack(args))
+                            end
+                        elseif method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
+                            if typeof(args[1]) == "Ray" then
+                                local origMag = math.max(args[1].Direction.Magnitude, 1000)
+                                args[1] = Ray.new(args[1].Origin, (hitPos - args[1].Origin).Unit * origMag)
+                                return oldNamecall(self, unpack(args))
+                            end
+                        elseif method == "ScreenPointToRay" or method == "ViewportPointToRay" then
+                            local origin = Camera.CFrame.Position
+                            local direction = (hitPos - origin).Unit
+                            return Ray.new(origin, direction)
+                        elseif method == "FireServer" or method == "InvokeServer" then
+                            for i, v in pairs(args) do
+                                if typeof(v) == "Vector3" then
+                                    args[i] = hitPos
+                                elseif typeof(v) == "CFrame" then
+                                    args[i] = hitCF
+                                elseif typeof(v) == "Instance" and v:IsA("BasePart") then
+                                    args[i] = targetPart
+                                elseif type(v) == "table" then
+                                    DeepReplace(v, hitPos, hitCF, targetPart, 0)
+                                end
+                            end
+                            return oldNamecall(self, unpack(args))
+                        end
+                    end
+                end
+            end
+        end
+        return oldNamecall(self, ...)
+    end)
+
+    local oldIndex
+    oldIndex = hookmetamethod(game, "__index", function(self, key)
+        if not IsUnloaded and QuantumConfig.SilentAim and not checkcaller() then
+            if self == Mouse and (key == "Target" or key == "Hit" or key == "UnitRay") then
+                if math.random(1, 100) <= QuantumConfig.HitChance then
+                    local targetChar = CachedBestTarget
+                    if targetChar and IsAliveAndValid(targetChar) then
+                        local targetPart = GetTargetPart(targetChar)
+                        if targetPart then
+                            local hitPos = GetPredictedPosition(targetPart)
+                            if key == "Target" then
+                                return targetPart
+                            elseif key == "Hit" then
+                                return CFrame.new(hitPos)
+                            elseif key == "UnitRay" then
+                                local origin = Camera.CFrame.Position
+                                local direction = (hitPos - origin).Unit
+                                return Ray.new(origin, direction)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return oldIndex(self, key)
+    end)
+end
+
+-----------------------------------
+-- 11. UNLOAD & CLEANUP REGISTRATION
+-----------------------------------
+local function FullCleanup()
+    if IsUnloaded then return end
+    IsUnloaded = true
+
+    for _, conn in ipairs(Connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    table.clear(Connections)
+
+    pcall(function() FOVCircle:Remove() end)
+    pcall(function() TargetSnapLine:Remove() end)
+    pcall(function() TargetLockRing:Remove() end)
+
+    for model, _ in pairs(ESP_Objects) do
+        RemoveESPData(model)
+    end
+
+    for model, _ in pairs(ActiveEntities) do
+        RestoreCharacterHitboxes(model)
+        local hl = model and model:FindFirstChild("QuantumChams")
+        if hl then pcall(function() hl:Destroy() end) end
+    end
+    table.clear(ActiveEntities)
+    table.clear(DiscoveredBotModels)
+
+    for part, canCol in pairs(LocalPlayerNoclipCache) do
+        if part and part.Parent then
+            pcall(function() part.CanCollide = canCol end)
+        end
+    end
+    table.clear(LocalPlayerNoclipCache)
+
+    local lChar = LocalPlayer.Character
+    local lHrp = lChar and lChar:FindFirstChild("QuantumAuraEmitter", true)
+    if lHrp then pcall(function() lHrp:Destroy() end) end
+
+    pcall(function()
+        Lighting.ClockTime = OriginalLighting.ClockTime
+        Lighting.Brightness = OriginalLighting.Brightness
+        Lighting.Ambient = OriginalLighting.Ambient
+        Lighting.OutdoorAmbient = OriginalLighting.OutdoorAmbient
+        Lighting.FogEnd = OriginalLighting.FogEnd
+        for _, obj in ipairs(CreatedLightingObjects) do
+            if obj and obj.Parent then obj:Destroy() end
+        end
+    end)
+
+    if ScreenGui and ScreenGui.Parent then
+        pcall(function() ScreenGui:Destroy() end)
+    end
+end
+
+GlobalEnv.QuantumHubCleanup = FullCleanup
+
+CreateActionButton(SettingsTab, "Unload Quantum Hub & Restore Defaults", "UNLOAD", FullCleanup)
+
+Notify("Quantum Hub v3.5 Loaded", "Universal Player & Deep-AI/Bot Engine Active! Press RightShift to toggle.", 4.0, false)
+UpdateTheme()
+UpdateWorld()
